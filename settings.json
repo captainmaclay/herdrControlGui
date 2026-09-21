@@ -1,0 +1,8 @@
+{
+  "language": "en",
+  "auto_proxy_failover": true,
+  "auto_refresh_routes": true,
+  "backup_dir": "",
+  "last_backup_time": null,
+  "auto_backup_enabled": false
+}

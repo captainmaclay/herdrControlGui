@@ -1,0 +1,13 @@
+[
+  {
+    "id": 1,
+    "host": "127.0.0.1",
+    "port": 1081,
+    "label": "SOCKS5 :1081",
+    "status": "unknown",
+    "ip": "-",
+    "country": "undefined",
+    "latency_ms": null,
+    "last_checked": null
+  }
+]
