@@ -9,6 +9,7 @@
   <img src="https://img.shields.io/badge/Python-3.10+-yellow?logo=python" alt="Python" />
   <img src="https://img.shields.io/badge/Gemini-OAuth2_Advanced_(No_API_Keys)-4285F4?logo=google" alt="Gemini" />
   <img src="https://img.shields.io/badge/Claude-Direct_IP-D97706?logo=anthropic" alt="Claude" />
+  <img src="https://img.shields.io/badge/Localization-EN_%7C_RU-success?logo=translate" alt="Localization" />
   <img src="https://img.shields.io/badge/Encryption-AES--256--GCM-green?logo=security" alt="AES-256-GCM" />
 </p>
 
@@ -64,6 +65,11 @@
 - **Automated Scheduled Backups:** Configurable timer (e.g., every 12 hours) automatically saves encrypted snapshots to your designated directory (default: `%USERPROFILE%\Documents\HerdrBackups`).
 - **⚠️ Danger Zone (Wipe All Data):** Complete factory reset with two-step confirmation that securely purges all local logs, OAuth tokens, and profile stores.
 
+### 🌐 6. Instant Localization (EN / RU)
+- **English Default:** Starts in English by default, ready for international distribution.
+- **1-Click Language Switch:** Toggle instantly between English and Russian without restarting the application.
+- **Persistent State:** Saves chosen language in `settings.json`.
+
 ---
 
 ## 3. Architecture
@@ -78,6 +84,7 @@
 │    ├── gemini_manager.py   (Profile & token linkage)   │
 │    ├── strategy_manager.py (Geo-tendency analytics)    │
 │    ├── backup_manager.py   (AES-256-GCM snapshots)     │
+│    ├── i18n.py             (Bilingual engine EN/RU)    │
 │    └── settings_manager.py (Persistent configs)        │
 └──────────────────────────┬─────────────────────────────┘
                            │ (WSL Interop / UNC Paths)
@@ -104,24 +111,26 @@
 - Python 3.10+ installed on Windows.
 
 ### Quick Start
-1. Clone or extract the project:
+1. Clone the repository:
    ```cmd
-   git clone https://github.com/your-username/herdr-control-center.git
-   cd herdr-control-center
+   git clone https://github.com/captainmaclay/herdrControlGui.git
+   cd herdrControlGui
    ```
-2. Run the launcher:
+2. Run the automated setup or launch script:
    ```cmd
    gui.bat
    ```
-   *The launcher automatically initializes a Python virtual environment (`.venv`) and installs all dependencies.*
+   *The launcher automatically initializes a Python virtual environment (`.venv`) and installs all dependencies from `requirements.txt`.*
 
 ---
 
-## 5. Building Windows Release Executable (.exe)
-To compile a standalone, zero-dependency Windows executable:
+## 5. Standalone Release Executable (.exe)
+You can download the pre-compiled `HerdrControlCenter.exe` from the [GitHub Releases](https://github.com/captainmaclay/herdrControlGui/releases) page.
+
+To compile it yourself from source:
 ```cmd
 python -m pip install pyinstaller
-pyinstaller --noconsole --onefile --name HerdrControlCenter config_app.py
+pyinstaller --noconsole --onefile --name HerdrControlCenter --hidden-import=cryptography --hidden-import=pystray --hidden-import=PIL --hidden-import=requests --hidden-import=socks --hidden-import=dotenv --hidden-import=tkinter --hidden-import=i18n config_app.py
 ```
 The output file will be generated in `dist/HerdrControlCenter.exe`.
 
@@ -175,26 +184,34 @@ The output file will be generated in `dist/HerdrControlCenter.exe`.
 - **Импорт в чистую программу:** файл `.hbak` полностью восстанавливает настройки Windows и сессии WSL2.
 - **⚠️ Опасная зона (Wipe All Data):** кнопка полной очистки всех локальных логов, токенов и профилей с двойным подтверждением.
 
+### 🌐 6. Мгновенная локализация (EN / RU)
+- **Английский язык по умолчанию:** международная версия из коробки.
+- **Переключение в 1 клик:** мгновенная смена языка интерфейса без перезапуска приложения.
+- **Сохранение состояния:** выбранный язык сохраняется в `settings.json`.
+
 ---
 
 ## 3. Установка и запуск
 
 1. Склонируйте репозиторий:
    ```cmd
-   git clone https://github.com/your-username/herdr-control-center.git
-   cd herdr-control-center
+   git clone https://github.com/captainmaclay/herdrControlGui.git
+   cd herdrControlGui
    ```
 2. Запустите центр управления:
    ```cmd
    gui.bat
    ```
-   *Скрипт автоматически создаст изолированное окружение `.venv` и установит необходимые библиотеки.*
+   *Скрипт автоматически создаст изолированное окружение `.venv` и установит необходимые библиотеки из `requirements.txt`.*
 
 ---
 
-## 4. Сборка автономного исполняемого файла (.exe)
+## 4. Готовый исполняемый файл (.exe)
+Вы можете скачать собранный автономный файл `HerdrControlCenter.exe` со страницы [GitHub Releases](https://github.com/captainmaclay/herdrControlGui/releases).
+
+Для самостоятельной компиляции из исходного кода:
 ```cmd
 python -m pip install pyinstaller
-pyinstaller --noconsole --onefile --name HerdrControlCenter config_app.py
+pyinstaller --noconsole --onefile --name HerdrControlCenter --hidden-import=cryptography --hidden-import=pystray --hidden-import=PIL --hidden-import=requests --hidden-import=socks --hidden-import=dotenv --hidden-import=tkinter --hidden-import=i18n config_app.py
 ```
 Готовый релизный файл появится в папке `dist/HerdrControlCenter.exe`.
