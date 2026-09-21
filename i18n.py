@@ -1,0 +1,528 @@
+"""Internationalization (i18n) module for Herdr Control Center.
+Supports English ('en') as default and Russian ('ru').
+"""
+
+from __future__ import annotations
+
+from typing import Any
+import settings_manager
+
+# Current active language code ('en' or 'ru')
+_CURRENT_LANGUAGE: str = "en"
+
+TRANSLATIONS: dict[str, dict[str, str]] = {
+    "en": {
+        # General & App Window
+        "app_title": "Herdr Control Center — Routes, SOCKS5, Gemini OAuth, Strategy & Backup",
+        "app_name": "Herdr Control Center",
+        "workspace_badge": " WSL2 WORKSPACE ",
+        "status_init": "● Initializing...",
+        "status_checking": "● Checking routes in WSL2...",
+        "status_routes_ok": "● All routes operational",
+        "status_partial_error": "● Route warning / offline",
+        "lbl_ready": "Ready",
+        "btn_refresh_status": "🔄 Refresh Status",
+        "lbl_auto_refresh": "Auto-refresh (30s)",
+        "lbl_auto_failover": "Auto Proxy Failover",
+        "lbl_last_check": "Last checked: {time}",
+        "btn_check_all": "🔄 Refresh Status",
+
+        # Tabs
+        "tab_routes": "📡 Routes",
+        "tab_proxy": "🛡️ SOCKS5 Proxies",
+        "tab_gemini": "🔮 Gemini OAuth",
+        "tab_strategy": "📊 Strategy",
+        "tab_backup": "💾 Backup",
+        "tab_localization": "🌐 Localization",
+
+        # Page 1: Routes
+        "herdr_title": "🐧 Herdr Multiplexer in WSL2",
+        "herdr_badge_active": "WSL2: CONNECTED",
+        "herdr_badge_waiting": "WSL2: WAITING",
+        "herdr_badge_offline": "WSL2: OFFLINE",
+        "herdr_pane_1": "Pane 1: agy (Google Gemini)",
+        "herdr_pane_2": "Pane 2: Claude Code (Anthropic)",
+        "gemini_route_title": "🔮 Google Gemini API (SOCKS5 Isolation)",
+        "claude_route_title": "🧠 Anthropic Claude (Direct Connection)",
+        "lbl_endpoint": "Endpoint:",
+        "lbl_route": "Route:",
+        "lbl_latency": "Latency:",
+        "lbl_direct_ip": "Original IP:",
+        "lbl_models": "Models:",
+        "btn_ping_test": "⚡ Ping Test",
+        "gemini_route_note": "● Routing isolated per account (Port: 1081+). Auto-failover on 429 quota limits.",
+        "claude_route_note": "● Direct IP routing without proxy to maximize throughput & avoid bans.",
+        "route_direct_val": "Direct Connection (No Proxy)",
+        "status_checking_short": "Checking...",
+        "status_connected": "Connected",
+        "status_failed": "Failed",
+        "status_port_offline": "Port offline",
+        "route_gemini_active": "● Dedicated SOCKS5 active • 127.0.0.1:{port} operational",
+        "route_gemini_ping": "Reachable via SOCKS5 :{port} ({lat} ms)",
+        "route_gemini_offline": "Unreachable (check port {port})",
+        "route_claude_active": "● Direct connection active • Traffic routed without proxy",
+        "route_claude_ip": "{ip} (Original IP)",
+        "route_claude_ping": "Reachable directly ({lat} ms)",
+        "route_claude_offline": "Unreachable",
+        "status_herdr_active": "● Herdr & Routes Active",
+        "status_monitoring_ok": "● Monitoring Active",
+        "herdr_not_running": "SERVER NOT RUNNING",
+        "herdr_wsl_stopped": "Herdr server in WSL2 is stopped. Run 'herdr' in WSL terminal.",
+        "herdr_no_panes": "Session running, no active agent panes yet.",
+        "herdr_reading_panes": "Reading active Herdr sessions from WSL socket...",
+        "gemini_checking": "● Checking SOCKS5 tunnel...",
+        "claude_checking": "● Checking direct connection...",
+        "pane_terminal": "Terminal",
+        "pane_panel": "Pane",
+        "pane_status": "status",
+        "pill_socks5": "🛡️ SOCKS5 TUNNEL",
+        "pill_direct": "🌐 DIRECT IP",
+        "waiting_check": "Pending check...",
+        "resolving_ip": "Resolving...",
+
+        # Page 2: Proxies
+        "proxy_title": "🛡️ SOCKS5 Proxy Servers",
+        "proxy_subtitle": "Ports from 1081 with auto-increment (+1). 10 rows per page.",
+        "btn_add_port": "➕ Add SOCKS5",
+        "btn_check_all_proxies": "🔄 Check Page",
+        "btn_prev_page": "◀ Prev",
+        "btn_next_page": "Next ▶",
+        "lbl_page_counter": "Page {curr} of {total} (Total: {count})",
+        "col_id": "ID",
+        "col_port": "HOST : PORT",
+        "col_label": "PROFILE / LABEL",
+        "col_status": "STATUS",
+        "col_ip": "EXTERNAL IP",
+        "col_country": "COUNTRY",
+        "col_latency": "LATENCY",
+        "col_actions": "ACTIONS",
+        "btn_test": "⚡ Ping",
+        "btn_delete": "🗑️ Delete",
+        "status_online": "Online",
+        "status_offline": "Offline",
+        "status_unknown": "Untested",
+        "prompt_enter_port": "Enter SOCKS5 port number (e.g. 1083):",
+        "prompt_enter_label": "Enter description or label for this proxy:",
+
+        # Page 3: Gemini OAuth
+        "gemini_title": "🔮 Google Gemini Profiles & Accounts",
+        "gemini_subtitle": "Multi-account OAuth management without API keys (~/.gemini/profiles)",
+        "lbl_active_account": "CURRENT ACTIVE ACCOUNT (WSL2 / AGY):",
+        "lbl_token_expiry": "Token Expiry:",
+        "lbl_assigned_tunnel": "Assigned Tunnel:",
+        "lbl_guard_daemon": "Guard Daemon:",
+        "btn_switch_account": "Switch Account",
+        "btn_refresh_token": "🔄 Refresh Token",
+        "btn_add_google_profile": "➕ Add Google Profile",
+        "btn_start_guard": "Start",
+        "btn_stop_guard": "Stop",
+        "btn_rotate_now": "⚡ Rotate Now",
+        "lbl_guard_running": "ACTIVE",
+        "lbl_guard_stopped": "OFF",
+        "col_gem_name": "Profile Name",
+        "col_gem_email": "Email Account",
+        "col_gem_port": "SOCKS5 Port",
+        "col_gem_token": "Token Status",
+        "col_gem_actions": "Actions",
+        "btn_activate": "Activate",
+        "btn_active": "ACTIVE",
+        "token_valid": "Valid",
+        "token_expired": "Expired",
+        "prompt_new_profile_name": "New port will be assigned: SOCKS5 127.0.0.1:{port}\n\nEnter profile name:",
+        "prompt_oauth_browser": "A browser window will open for Google Authorization.\n\nAssigned Port: SOCKS5 127.0.0.1:{port}\nProfile: {profile}\n\nClick OK to proceed with OAuth login in WSL2.",
+        "spotlight_info": "Profile: {profile}  •  Token: {expiry}  •  Dedicated tunnel: SOCKS5 127.0.0.1:{port} (IP: {ip} • {country})",
+        "badge_standby": "STANDBY",
+        "no_active_google": "⚪ No active Google account",
+        "click_login_google": "Click '➕ Add Google Profile' to authenticate an account via browser.",
+        "not_authorized": "NOT AUTHORIZED",
+        "btn_stop": "Stop",
+        "btn_start": "Start",
+        "no_profiles": "No saved OAuth profiles.\nClick the button above to log into your first Google account via browser.",
+        "guard_card_title": "🔄 Auto-switch on quota exhaustion",
+        "guard_card_desc": "When receiving 429 / Quota Exceeded, the system automatically rotates accounts and updates SOCKS5 tunnel.",
+        "guard_chk_failover": "Auto proxy failover on failure (same-country priority)",
+        "profiles_list_title": "Saved Profiles List (~/.gemini/profiles)",
+
+        # Page 4: Strategy
+        "strategy_title": "📊 Proxy Strategy & Account Usage",
+        "strategy_subtitle": "Country trends, anti-fraud recommendation score & launch logs",
+        "card_country_trends": "Country Usage Trends",
+        "card_recommendations": "Anti-Fraud Recommendations",
+        "lbl_current_country": "Current Country:",
+        "lbl_dominant_country": "Dominant Trend:",
+        "status_optimal": "🟢 OK • Verified Region",
+        "status_nice_to_change": "🟡 Nice to change",
+        "status_baseline": "⚪ Baseline Mode",
+        "lbl_total_launches": "Total Launches:",
+        "col_strat_time": "Timestamp",
+        "col_strat_account": "Account / Profile",
+        "col_strat_port": "Port",
+        "col_strat_ip": "External IP",
+        "col_strat_country": "Country",
+        "col_strat_event": "Event",
+        "btn_refresh_analytics": "🔄 Refresh",
+        "btn_clear_history": "🗑️ Clear History",
+        "btn_ext_log": "📋 Extended Log ({count})",
+        "btn_fix_route": "Fix Route ➔",
+        "lbl_no_history": "No strategy history records found yet.",
+        "empty_strat": "No Gemini profiles found. Add an account in 'Gemini OAuth' tab.",
+        "stat_str": "Current: {curr_ip} ({curr_co})  •  Dominant: {dom_co} ({pct}%)  •  Launches: {total}",
+        "rec_optimal_note": "✓ Proxy region matches account history. Low anti-fraud risk.",
+        "rec_change_note": "⚠ Proxy country differs from predominant usage ({dom_co}). Recommend switching.",
+        "rec_baseline_note": "Insufficient launch history to determine regional trend.",
+
+        # Page 5: Backup & Reset
+        "backup_title": "💾 Backup & Snapshots (AES-256-GCM)",
+        "backup_subtitle": "Bare-metal snapshots of Windows configs and WSL2 OAuth profiles with PBKDF2 encryption",
+        "lbl_master_password": "🔐 Master Encryption Password:",
+        "lbl_fingerprint": "Password Fingerprint (SHA-256): [ {fp} ]",
+        "lbl_empty_pw": "Password Fingerprint (SHA-256): [ (empty) ]",
+        "pw_card_note": "Password is saved in .env and used for AES-256-GCM encryption. Without this password, backups cannot be created or restored.",
+        "btn_show_pw": "👁️ Show",
+        "btn_hide_pw": "👁️ Hide",
+        "btn_export_snapshot": "📦 Export Encrypted Snapshot (.hbak)",
+        "btn_import_snapshot": "📂 Import & Restore (.hbak)",
+        "lbl_auto_backup_title": "Automated Scheduled Backups",
+        "lbl_enable_auto_backup": "Periodic auto-backup every",
+        "lbl_backup_interval": "hours",
+        "lbl_backup_dir": "📁 Backup Directory:",
+        "btn_browse": "Browse...",
+        "btn_backup_now": "💾 Backup Now to Folder",
+        "danger_zone_title": "⚠️ Danger Zone (Factory Reset)",
+        "danger_zone_desc": "Completely purges all local logs, OAuth sessions/tokens in WSL2, profile directories, resets all SOCKS5 port bindings and restores default settings.",
+        "btn_wipe_all_data": "🗑️ Wipe All Data",
+        "lbl_last_backup": "Last backup: {time}",
+        "lbl_never_backed_up": "never",
+
+        # Page 6: Localization (NEW)
+        "loc_title": "🌐 Interface Language & Localization",
+        "loc_subtitle": "Choose the display language for Herdr Control Center",
+        "loc_select_lang": "Select Application Language",
+        "loc_lang_en": "🇬🇧 English (Default)",
+        "loc_lang_en_desc": "Standard international version. All interfaces, settings, prompts, and status messages are presented in English.",
+        "loc_lang_ru": "🇷🇺 Русский (Russian)",
+        "loc_lang_ru_desc": "Полная русскоязычная версия со всеми оригинальными описаниями, системными подсказками и диагностикой.",
+        "loc_info_title": "ℹ️ Dynamic Language Switching",
+        "loc_info_desc": "Language settings are saved automatically in settings.json and applied instantly across all tabs without restarting the program.",
+        "loc_status_saved": "✓ Language successfully changed to English.",
+
+        # System Tray
+        "tray_show": "Show Herdr Control Center",
+        "tray_refresh": "Refresh Routes",
+        "tray_exit": "Exit",
+
+        # Dialogs & Messages
+        "msg_del_proxy_title": "Delete Proxy",
+        "msg_del_proxy_text": "Delete SOCKS5 proxy on port {port}?",
+        "msg_switch_title": "Account Switch",
+        "msg_error_title": "Error",
+        "msg_warning_title": "Warning",
+        "msg_success_title": "Success",
+        "msg_del_profile_title": "Delete Profile",
+        "msg_del_profile_text": "Delete saved profile '{name}'?",
+        "msg_guard_stopped": "Account auto-switch service stopped.",
+        "msg_guard_started": "Account auto-switch service started in WSL2.",
+        "msg_wipe_confirm_1_title": "⚠️ Wipe All Data",
+        "msg_wipe_confirm_1_text": (
+            "Are you SURE you want to completely wipe all Herdr data?\n\n"
+            "This will:\n"
+            "- Stop the WSL guard daemon\n"
+            "- Delete all OAuth profiles and authentication tokens in WSL2\n"
+            "- Delete strategy history and local logs\n"
+            "- Reset .env, proxies.json and settings.json to defaults\n\n"
+            "This action CANNOT be undone!"
+        ),
+        "msg_wipe_confirm_2_title": "⚠️ Final Confirmation",
+        "msg_wipe_confirm_2_text": (
+            "FINAL CONFIRMATION:\n\n"
+            "All saved accounts, tokens, and settings will be permanently lost.\n\n"
+            "Proceed with full data wipe?"
+        ),
+        "msg_wipe_complete_title": "Factory Reset Complete",
+        "msg_enter_password_warning": "Please enter a master password first!",
+        "msg_enter_decrypt_password_warning": "Please enter a password to decrypt the backup!",
+        "msg_export_success": "Encrypted backup successfully created!\n\nLocation: {path}",
+        "msg_export_error": "Failed to create backup: {err}",
+        "msg_import_confirm": "Restoring from snapshot will overwrite current settings and WSL2 profiles.\n\nFile: {path}\n\nProceed?",
+        "msg_import_success": "Backup successfully restored!",
+        "msg_import_error": "Failed to restore backup: {err}",
+        "msg_clear_history_confirm": "Clear all strategy and proxy launch history?",
+        "msg_strategy_redirect": "Profile '{name}' successfully redirected to port :{port}!",
+    },
+    "ru": {
+        # General & App Window
+        "app_title": "Herdr Control Center — Маршруты, SOCKS5, Gemini OAuth, Strategy & Backup",
+        "app_name": "Herdr Control Center",
+        "workspace_badge": " WSL2 WORKSPACE ",
+        "status_init": "● Инициализация...",
+        "status_checking": "● Проверка маршрутов в WSL2...",
+        "status_routes_ok": "● Все маршруты в норме",
+        "status_partial_error": "● Ошибка туннеля / офлайн",
+        "lbl_ready": "Готов",
+        "btn_refresh_status": "🔄 Обновить статус",
+        "lbl_auto_refresh": "Автопроверка (30 сек)",
+        "lbl_auto_failover": "Автоподбор Proxy при failure",
+        "lbl_last_check": "Последняя проверка: {time}",
+        "btn_check_all": "🔄 Проверить всё",
+
+        # Tabs
+        "tab_routes": "📡 Маршруты",
+        "tab_proxy": "🛡️ SOCKS5 Прокси",
+        "tab_gemini": "🔮 Gemini OAuth",
+        "tab_strategy": "📊 Strategy",
+        "tab_backup": "💾 Backup",
+        "tab_localization": "🌐 Локализация",
+
+        # Page 1: Routes
+        "herdr_title": "🐧 Herdr Multiplexer в WSL2",
+        "herdr_badge_active": "WSL2: ПОДКЛЮЧЕНО",
+        "herdr_badge_waiting": "WSL2: ОЖИДАНИЕ",
+        "herdr_badge_offline": "WSL2: ОТКЛЮЧЕНО",
+        "herdr_pane_1": "Pane 1: agy (Google Gemini)",
+        "herdr_pane_2": "Pane 2: Claude Code (Anthropic)",
+        "gemini_route_title": "🔮 Google Gemini API (SOCKS5 Изоляция)",
+        "claude_route_title": "🧠 Anthropic Claude (Оригинальный IP)",
+        "lbl_endpoint": "Эндпоинт:",
+        "lbl_route": "Маршрут:",
+        "lbl_latency": "Задержка:",
+        "lbl_direct_ip": "Внешний IP:",
+        "lbl_models": "Модели:",
+        "btn_ping_test": "⚡ Проверить пинг",
+        "gemini_route_note": "● Маршрутизация изолирована для каждого аккаунта (порт: 1081+). Автосмена при 429.",
+        "claude_route_note": "● Прямое подключение без прокси для максимальной скорости и безопасности.",
+        "route_direct_val": "Прямой доступ (без проксирования)",
+        "status_checking_short": "Проверка...",
+        "status_connected": "Подключено",
+        "status_failed": "Сбой",
+        "status_port_offline": "Порт закрыт",
+        "route_gemini_active": "● Персональный SOCKS5 активен • 127.0.0.1:{port} работает корректно",
+        "route_gemini_ping": "Доступен через SOCKS5 :{port} ({lat} ms)",
+        "route_gemini_offline": "Недоступен (проверьте порт {port})",
+        "route_claude_active": "● Прямое подключение активно • Трафик без проксирования",
+        "route_claude_ip": "{ip} (Оригинальный IP)",
+        "route_claude_ping": "Доступен напрямую ({lat} ms)",
+        "route_claude_offline": "Недоступен",
+        "status_herdr_active": "● Herdr & Сеть активны",
+        "status_monitoring_ok": "● Мониторинг в норме",
+        "herdr_not_running": "СЕРВЕР НЕ ЗАПУЩЕН",
+        "herdr_wsl_stopped": "Сервер Herdr в WSL2 остановлен. Запустите 'herdr' в терминале WSL.",
+        "herdr_no_panes": "Сессия запущена, активных панелей пока нет.",
+        "herdr_reading_panes": "Считывание активных сессий Herdr из сокета WSL...",
+        "gemini_checking": "● Проверка туннеля SOCKS5...",
+        "claude_checking": "● Проверка прямого подключения...",
+        "pane_terminal": "Терминал",
+        "pane_panel": "Панель",
+        "pane_status": "статус",
+        "pill_socks5": "🛡️ SOCKS5 ТУННЕЛЬ",
+        "pill_direct": "🌐 ОРИГИНАЛЬНЫЙ IP",
+        "waiting_check": "Ожидание проверки...",
+        "resolving_ip": "Определение...",
+
+        # Page 2: Proxies
+        "proxy_title": "🛡️ SOCKS5 Прокси-серверы",
+        "proxy_subtitle": "Порты от 1081 с авто-инкрементом (+1). Пагинация по 10 строк.",
+        "btn_add_port": "➕ Добавить SOCKS5",
+        "btn_check_all_proxies": "🔄 Проверить страницу",
+        "btn_prev_page": "◀ Назад",
+        "btn_next_page": "Вперед ▶",
+        "lbl_page_counter": "Страница {curr} из {total} (Всего: {count})",
+        "col_id": "ID",
+        "col_port": "ХОСТ : ПОРТ",
+        "col_label": "ПРОФИЛЬ / МЕТКА",
+        "col_status": "СТАТУС",
+        "col_ip": "ВНЕШНИЙ IP",
+        "col_country": "СТРАНА",
+        "col_latency": "ОТКЛИК",
+        "col_actions": "ДЕЙСТВИЯ",
+        "btn_test": "⚡ Пинг",
+        "btn_delete": "🗑️ Удалить",
+        "status_online": "Online",
+        "status_offline": "Offline",
+        "status_unknown": "Не проверен",
+        "prompt_enter_port": "Введите номер порта SOCKS5 (например, 1083):",
+        "prompt_enter_label": "Введите описание или метку для этого прокси:",
+
+        # Page 3: Gemini OAuth
+        "gemini_title": "🔮 Профили и аккаунты Google Gemini",
+        "gemini_subtitle": "Многопользовательское управление OAuth без API-ключей (~/.gemini/profiles)",
+        "lbl_active_account": "ТЕКУЩИЙ АКТИВНЫЙ АККАУНТ (WSL2 / AGY):",
+        "lbl_token_expiry": "Срок действия токена:",
+        "lbl_assigned_tunnel": "Выделенный туннель:",
+        "lbl_guard_daemon": "Guard-демон:",
+        "btn_switch_account": "Сменить аккаунт",
+        "btn_refresh_token": "🔄 Обновить токен",
+        "btn_add_google_profile": "➕ Добавить Google профиль",
+        "btn_start_guard": "Включить",
+        "btn_stop_guard": "Остановить",
+        "btn_rotate_now": "⚡ Сменить аккаунт сейчас",
+        "lbl_guard_running": "АКТИВНА",
+        "lbl_guard_stopped": "ВЫКЛЮЧЕНА",
+        "col_gem_name": "Имя профиля",
+        "col_gem_email": "Почтовый аккаунт",
+        "col_gem_port": "Порт SOCKS5",
+        "col_gem_token": "Статус токена",
+        "col_gem_actions": "Действия",
+        "btn_activate": "Сделать активным",
+        "btn_active": "АКТИВЕН",
+        "token_valid": "Действителен",
+        "token_expired": "Истёк",
+        "prompt_new_profile_name": "Будет привязан новый порт: SOCKS5 127.0.0.1:{port}\n\nВведите имя профиля:",
+        "prompt_oauth_browser": "Сейчас откроется браузер для авторизации Google.\n\nВыделенный порт: SOCKS5 127.0.0.1:{port}\nПрофиль: {profile}\n\nНажмите OK для запуска авторизации в WSL2.",
+        "spotlight_info": "Профиль: {profile}  •  Токен: {expiry}  •  Выделенный туннель: SOCKS5 127.0.0.1:{port} (IP: {ip} • {country})",
+        "badge_standby": "В РЕЗЕРВЕ",
+        "no_active_google": "⚪ Нет активного Google аккаунта",
+        "click_login_google": "Нажмите '➕ Войти в Google аккаунт', чтобы авторизовать учетную запись.",
+        "not_authorized": "НЕ АВТОРИЗОВАН",
+        "btn_stop": "Остановить",
+        "btn_start": "Включить",
+        "no_profiles": "Нет сохраненных OAuth профилей.\nНажмите кнопку выше, чтобы войти в первый Google-аккаунт через браузер.",
+        "guard_card_title": "🔄 Автосмена при исчерпании лимитов",
+        "guard_card_desc": "При получении ошибки 429 / Quota Exceeded система автоматически переключает аккаунт и SOCKS5-порт.",
+        "guard_chk_failover": "Автоподбор Proxy при failure (приоритет той же страны)",
+        "profiles_list_title": "Список сохраненных профилей (~/.gemini/profiles)",
+
+        # Page 4: Strategy
+        "strategy_title": "📊 Стратегия Proxy и аналитика аккаунтов",
+        "strategy_subtitle": "Тенденции по странам, оценка безопасности запусков и журнал событий",
+        "card_country_trends": "Тенденции использования стран",
+        "card_recommendations": "Рекомендации безопасности",
+        "lbl_current_country": "Текущая страна:",
+        "lbl_dominant_country": "Преобладающая страна:",
+        "status_optimal": "🟢 ОК • Регион подтвержден",
+        "status_nice_to_change": "🟡 Nice to change",
+        "status_baseline": "⚪ Базовый режим",
+        "lbl_total_launches": "Всего запусков:",
+        "col_strat_time": "Время",
+        "col_strat_account": "Аккаунт / Профиль",
+        "col_strat_port": "Порт",
+        "col_strat_ip": "Внешний IP",
+        "col_strat_country": "Страна",
+        "col_strat_event": "Событие",
+        "btn_refresh_analytics": "🔄 Обновить",
+        "btn_clear_history": "🗑️ Очистить историю",
+        "btn_ext_log": "📋 Расширенный лог ({count})",
+        "btn_fix_route": "Исправить ➔",
+        "lbl_no_history": "История стратегий пока пуста.",
+        "empty_strat": "Нет профилей Gemini. Добавьте аккаунт во вкладке 'Gemini OAuth'.",
+        "stat_str": "Текущий: {curr_ip} ({curr_co})  •  Доминирует: {dom_co} ({pct}%)  •  Запусков: {total}",
+        "rec_optimal_note": "✓ Страна совпадает с преобладающей историей запусков. Риск банов минимален.",
+        "rec_change_note": "⚠ Текущая страна отличается от типичной для аккаунта ({dom_co}). Рекомендуется смена.",
+        "rec_baseline_note": "Недостаточно статистики запусков для выявления региональной тенденции.",
+
+        # Page 5: Backup & Reset
+        "backup_title": "💾 Резервные копии и снимки системы (AES-256-GCM)",
+        "backup_subtitle": "Полные снимки настроек Windows и профилей WSL2 с шифрованием PBKDF2",
+        "lbl_master_password": "🔐 Мастер-пароль шифрования:",
+        "lbl_fingerprint": "Хэш-отпечаток (SHA-256): [ {fp} ]",
+        "lbl_empty_pw": "Хэш-отпечаток (SHA-256): [ не задан ]",
+        "pw_card_note": "Пароль хранится в .env и используется для шифрования архивов AES-256-GCM. Без введенного пароля бэкап невозможно создать или расшифровать.",
+        "btn_show_pw": "👁️ Показать",
+        "btn_hide_pw": "👁️ Скрыть",
+        "btn_export_snapshot": "📦 Экспорт снимка (.hbak)",
+        "btn_import_snapshot": "📂 Восстановить из архива (.hbak)",
+        "lbl_auto_backup_title": "Автоматическое создание снимков по расписанию",
+        "lbl_enable_auto_backup": "Периодический автобэкап каждые",
+        "lbl_backup_interval": "ч",
+        "lbl_backup_dir": "📁 Папка бэкапов:",
+        "btn_browse": "Обзор...",
+        "btn_backup_now": "💾 Сохранить снимок в папку сейчас",
+        "danger_zone_title": "⚠️ Опасная зона (Сброс к заводским настройкам)",
+        "danger_zone_desc": "Полное удаление всех локальных данных, токенов и профилей авторизации в WSL2, сброс портов прокси и возврат к заводским настройкам.",
+        "btn_wipe_all_data": "🗑️ Очистить все данные",
+        "lbl_last_backup": "Последний бэкап: {time}",
+        "lbl_never_backed_up": "еще не создавался",
+
+        # Page 6: Localization (NEW)
+        "loc_title": "🌐 Язык интерфейса и локализация",
+        "loc_subtitle": "Выберите язык отображения для Herdr Control Center",
+        "loc_select_lang": "Выбор языка интерфейса",
+        "loc_lang_en": "🇬🇧 English (Default)",
+        "loc_lang_en_desc": "Standard international version. All interfaces, settings, prompts, and status messages are presented in English.",
+        "loc_lang_ru": "🇷🇺 Русский (Russian)",
+        "loc_lang_ru_desc": "Полная русскоязычная версия со всеми оригинальными описаниями, системными подсказками и диагностикой.",
+        "loc_info_title": "ℹ️ Мгновенное переключение языка",
+        "loc_info_desc": "Изменение языка сохраняется автоматически в settings.json и применяется мгновенно ко всем элементам интерфейса без необходимости перезапуска программы.",
+        "loc_status_saved": "✓ Язык интерфейса успешно переключен на русский.",
+
+        # System Tray
+        "tray_show": "Показать Herdr Center",
+        "tray_refresh": "Обновить маршруты",
+        "tray_exit": "Выход",
+
+        # Dialogs & Messages
+        "msg_del_proxy_title": "Удаление",
+        "msg_del_proxy_text": "Удалить SOCKS5 прокси с портом {port}?",
+        "msg_switch_title": "Переключение",
+        "msg_error_title": "Ошибка",
+        "msg_warning_title": "Внимание",
+        "msg_success_title": "Успешно",
+        "msg_del_profile_title": "Удаление профиля",
+        "msg_del_profile_text": "Удалить сохраненный профиль '{name}'?",
+        "msg_guard_stopped": "Служба автосмены аккаунтов остановлена.",
+        "msg_guard_started": "Служба автосмены аккаунтов запущена в WSL2.",
+        "msg_wipe_confirm_1_title": "⚠️ Очистка всех данных",
+        "msg_wipe_confirm_1_text": (
+            "Вы УВЕРЕНЫ, что хотите полностью стереть все данные Herdr?\n\n"
+            "Будет выполнено:\n"
+            "- Остановка службы автосмены в WSL\n"
+            "- Удаление всех профилей и токенов авторизации в WSL2\n"
+            "- Очистка истории стратегий и логов\n"
+            "- Сброс .env, proxies.json и settings.json к заводским настройкам\n\n"
+            "Это действие НЕОБРАТИМО!"
+        ),
+        "msg_wipe_confirm_2_title": "⚠️ Финальное подтверждение",
+        "msg_wipe_confirm_2_text": (
+            "ФИНАЛЬНОЕ ПОДТВЕРЖДЕНИЕ:\n\n"
+            "Все сохраненные аккаунты, токены и настройки будут безвозвратно удалены.\n\n"
+            "Продолжить полное удаление?"
+        ),
+        "msg_wipe_complete_title": "Очистка завершена",
+        "msg_enter_password_warning": "Сначала введите пароль для шифрования бэкапа!",
+        "msg_enter_decrypt_password_warning": "Сначала введите пароль для расшифровки бэкапа!",
+        "msg_export_success": "Резервная копия успешно создана!\n\nРасположение: {path}",
+        "msg_export_error": "Не удалось создать резервную копию: {err}",
+        "msg_import_confirm": "Восстановление снимка перезапишет текущие настройки и профили WSL2.\n\nФайл: {path}\n\nПродолжить?",
+        "msg_import_success": "Резервная копия успешно восстановлена!",
+        "msg_import_error": "Ошибка восстановления: {err}",
+        "msg_clear_history_confirm": "Очистить всю историю запусков и стратегий?",
+        "msg_strategy_redirect": "Профиль '{name}' успешно перенаправлен на порт :{port}!",
+    },
+}
+
+
+def init_language() -> str:
+    """Инициализирует язык из настроек (по умолчанию 'en')."""
+    global _CURRENT_LANGUAGE
+    saved = settings_manager.get_setting("language", "en")
+    if saved in ("en", "ru"):
+        _CURRENT_LANGUAGE = saved
+    else:
+        _CURRENT_LANGUAGE = "en"
+    return _CURRENT_LANGUAGE
+
+
+def get_lang() -> str:
+    """Возвращает текущий язык ('en' или 'ru')."""
+    return _CURRENT_LANGUAGE
+
+
+def set_lang(lang: str) -> None:
+    """Устанавливает и сохраняет текущий язык."""
+    global _CURRENT_LANGUAGE
+    if lang in ("en", "ru"):
+        _CURRENT_LANGUAGE = lang
+        settings_manager.set_setting("language", lang)
+
+
+def t(key: str, **kwargs: Any) -> str:
+    """Получает переведенную строку по ключу."""
+    lang_dict = TRANSLATIONS.get(_CURRENT_LANGUAGE, TRANSLATIONS["en"])
+    val = lang_dict.get(key)
+    if val is None:
+        val = TRANSLATIONS["en"].get(key, key)
+    if kwargs:
+        try:
+            return val.format(**kwargs)
+        except Exception:
+            return val
+    return val
