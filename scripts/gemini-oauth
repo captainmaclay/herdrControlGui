@@ -1,0 +1,621 @@
+#!/usr/bin/env python3
+"""Менеджер OAuth-аккаунтов Google для Antigravity CLI (agy).
+
+Реализует:
+- Привязку: 1 Google аккаунт = 1 персональный SOCKS5 порт (1081, 1082, 1083...)
+- Использование подписок Google AI Pro / Gemini Advanced через OAuth (БЕЗ API-ключей!)
+- Хранение нескольких авторизованных аккаунтов
+- Мгновенное переключение аккаунта и его SOCKS5-туннеля: gemini-oauth switch
+- Мониторинг текущего активного аккаунта, email и порта
+- Фоновый перехват токена во время agy login без блокировок
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+BASE_DIR = Path.home() / ".gemini"
+CLI_DIR = BASE_DIR / "antigravity-cli"
+ACTIVE_TOKEN = CLI_DIR / "antigravity-oauth-token"
+ACTIVE_PROXY_ENV = CLI_DIR / "active_proxy.env"
+ACTIVE_PROFILE_JSON = CLI_DIR / "active_profile.json"
+PROFILES_DIR = BASE_DIR / "profiles"
+PROFILE_ORDER_FILE = BASE_DIR / "profile_order.json"
+
+BASE_PORT = 1081
+
+
+def parse_jwt_email(id_token: str | None) -> tuple[str, str]:
+    """Извлекает email и имя пользователя из Google OAuth id_token."""
+    if not id_token:
+        return "Неизвестно", "Пользователь"
+    try:
+        parts = id_token.split(".")
+        if len(parts) >= 2:
+            pad = parts[1] + "=" * (4 - len(parts[1]) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(pad))
+            email = claims.get("email", "Без email")
+            name = claims.get("name", "Пользователь")
+            return email, name
+    except Exception:
+        pass
+    return "Неизвестно", "Пользователь"
+
+
+def get_token_info(token_file: Path) -> dict:
+    if not token_file.exists():
+        return {}
+    try:
+        with open(token_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        id_token = data.get("id_token")
+        email, name = parse_jwt_email(id_token)
+        return {
+            "email": email,
+            "name": name,
+            "auth_method": data.get("auth_method", "oauth"),
+            "file": str(token_file),
+        }
+    except Exception:
+        return {"email": "Ошибка чтения", "name": "Неизвестно"}
+
+
+def ordered_profile_dirs() -> list[Path]:
+    """Профили в порядке номеров (#1, #2...) из ~/.gemini/profile_order.json (задаётся в Herdr Control Center)."""
+    if not PROFILES_DIR.exists():
+        return []
+    existing = sorted(p.name for p in PROFILES_DIR.iterdir() if p.is_dir())
+    saved = []
+    try:
+        with open(PROFILE_ORDER_FILE, "r", encoding="utf-8") as f:
+            saved = [n for n in json.load(f).get("order", []) if isinstance(n, str)]
+    except Exception:
+        pass
+    order = [n for n in dict.fromkeys(saved) if n in existing]
+    order += [n for n in existing if n not in order]
+    return [PROFILES_DIR / n for n in order]
+
+
+def _read_saved_port(profile_dir: Path) -> tuple[int | None, bool]:
+    cfg_file = profile_dir / "profile_config.json"
+    if cfg_file.exists():
+        try:
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d.get("port"), int) and d["port"] >= BASE_PORT:
+                return d["port"], d.get("manual") is True
+        except Exception:
+            pass
+    return None, False
+
+
+def get_port_assignments() -> dict[str, int]:
+    """Раскладка портов без повторов (та же логика, что в Herdr Control Center):
+    ручные привязки -> сохранённые порты -> следующий свободный порт от BASE_PORT."""
+    try:
+        dirs = ordered_profile_dirs()
+    except Exception:
+        dirs = []
+
+    saved = {p.name: _read_saved_port(p) for p in dirs}
+    assignments: dict[str, int] = {}
+    used: set[int] = set()
+    for want_manual in (True, False):
+        for p in dirs:
+            port, is_manual = saved[p.name]
+            if p.name in assignments or port is None or is_manual != want_manual or port in used:
+                continue
+            assignments[p.name] = port
+            used.add(port)
+
+    # Сначала профили с сохранённым (но конфликтующим) портом, затем новые
+    for p in sorted(dirs, key=lambda d: saved[d.name][0] is None):
+        if p.name in assignments:
+            continue
+        cand = BASE_PORT
+        while cand in used:
+            cand += 1
+        assignments[p.name] = cand
+        used.add(cand)
+    return assignments
+
+
+def get_profile_port(profile_dir: Path) -> int:
+    """Определяет персональный SOCKS5-порт профиля с гарантией уникальности и сохраняет его."""
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    port = get_port_assignments()[profile_dir.name]
+    saved_port, is_manual = _read_saved_port(profile_dir)
+    if saved_port != port:
+        try:
+            with open(profile_dir / "profile_config.json", "w", encoding="utf-8") as f:
+                json.dump({"profile_name": profile_dir.name, "port": port, "manual": False}, f, indent=2)
+        except Exception:
+            pass
+    return port
+
+
+def write_active_proxy(port: int, email: str = "", profile_name: str = ""):
+    CLI_DIR.mkdir(parents=True, exist_ok=True)
+    env_content = (
+        f'# Auto-generated by gemini-oauth\n'
+        f'export ALL_PROXY="socks5h://127.0.0.1:{port}"\n'
+        f'export HTTPS_PROXY="socks5h://127.0.0.1:{port}"\n'
+        f'export HTTP_PROXY="socks5h://127.0.0.1:{port}"\n'
+        f'export GEMINI_ACTIVE_PORT="{port}"\n'
+        f'export GEMINI_ACTIVE_ACCOUNT="{email}"\n'
+    )
+    with open(ACTIVE_PROXY_ENV, "w", encoding="utf-8") as f:
+        f.write(env_content)
+
+    meta = {
+        "port": port,
+        "email": email,
+        "proxy_url": f"socks5h://127.0.0.1:{port}",
+    }
+    if profile_name:
+        meta["profile_name"] = profile_name
+    elif ACTIVE_PROFILE_JSON.exists():
+        try:
+            with open(ACTIVE_PROFILE_JSON, "r", encoding="utf-8") as f:
+                old = json.load(f)
+                if "profile_name" in old:
+                    meta["profile_name"] = old["profile_name"]
+        except Exception:
+            pass
+
+    with open(ACTIVE_PROFILE_JSON, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+
+
+def get_active_port() -> int:
+    if ACTIVE_PROFILE_JSON.exists():
+        try:
+            with open(ACTIVE_PROFILE_JSON, "r", encoding="utf-8") as f:
+                d = json.load(f)
+                return d.get("port", BASE_PORT)
+        except Exception:
+            pass
+    return BASE_PORT
+
+
+def _auto_heal_profiles():
+    """Синхронизирует активный токен с директориями профилей в WSL."""
+    if not ACTIVE_TOKEN.exists():
+        return
+    active_info = get_token_info(ACTIVE_TOKEN)
+    active_email = active_info.get("email", "")
+    if not active_email or active_email in ("Неизвестно", "Ошибка чтения", "Без email"):
+        return
+
+    PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+    profiles = ordered_profile_dirs()
+
+    # Читаем active_profile.json
+    active_pname = ""
+    if ACTIVE_PROFILE_JSON.exists():
+        try:
+            with open(ACTIVE_PROFILE_JSON, "r", encoding="utf-8") as f:
+                active_pname = json.load(f).get("profile_name", "")
+        except Exception:
+            pass
+
+    # Проверяем совпадение
+    matched = None
+    for p in profiles:
+        t = p / "antigravity-oauth-token"
+        if t.exists() and get_token_info(t).get("email") == active_email:
+            matched = p
+            try:
+                if ACTIVE_TOKEN.stat().st_mtime > t.stat().st_mtime:
+                    shutil.copy2(ACTIVE_TOKEN, t)
+            except Exception:
+                pass
+            break
+
+    if not matched:
+        for p in profiles:
+            if p.name.lower() == active_email.lower():
+                matched = p
+                break
+        if not matched and active_pname:
+            cand = PROFILES_DIR / active_pname
+            if cand.exists():
+                matched = cand
+        if not matched:
+            empty = [p for p in profiles if not (p / "antigravity-oauth-token").exists()]
+            if len(empty) == 1:
+                matched = empty[0]
+        if not matched:
+            matched = PROFILES_DIR / "account-1" if not profiles else PROFILES_DIR / f"account-{len(profiles) + 1}"
+            matched.mkdir(parents=True, exist_ok=True)
+
+        shutil.copy2(ACTIVE_TOKEN, matched / "antigravity-oauth-token")
+        p_port = get_profile_port(matched)
+        write_active_proxy(p_port, active_email, profile_name=matched.name)
+
+
+def cmd_list():
+    PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+    _auto_heal_profiles()
+
+    active_info = get_token_info(ACTIVE_TOKEN)
+    active_email = active_info.get("email", "")
+    active_port = get_active_port()
+
+    # Сканируем профили
+    profiles = ordered_profile_dirs()
+
+    print("=====================================================================")
+    print("  🔑 Google Gemini OAuth Profiles (1 Аккаунт = 1 SOCKS5 IP)")
+    print("=====================================================================")
+    if active_email:
+        print(f" Активный аккаунт:  🟢 {active_email} ({active_info.get('name')})")
+        print(f" Активный туннель:  🛡️ SOCKS5 127.0.0.1:{active_port}")
+    else:
+        print(" Активный аккаунт:  ⚪ Не авторизован")
+    print("---------------------------------------------------------------------")
+
+    if not profiles and not ACTIVE_TOKEN.exists():
+        print("  Нет сохраненных OAuth-профилей.")
+        print("  Запустите 'agy', чтобы войти через Google-аккаунт.")
+        print("=====================================================================")
+        return
+
+    for idx, p in enumerate(profiles, 1):
+        t_file = p / "antigravity-oauth-token"
+        token_exists = t_file.exists()
+        info = get_token_info(t_file) if token_exists else {}
+        email = info.get("email", "Авторизация не завершена") if token_exists else "Не авторизован"
+        name = info.get("name", "") if token_exists else "-"
+        port = get_profile_port(p)
+
+        is_active = (email == active_email and email not in ("", "Не авторизован", "Авторизация не завершена"))
+        marker = "👉 [АКТИВЕН]" if is_active else "   [Сохранен]"
+        badge = "🟢 В сети" if is_active else ("⚪ В резерве" if token_exists else "🟡 Пустой")
+
+        print(f" {marker} #{idx} Профиль: {p.name:<25} {badge} | SOCKS5 :{port}")
+        print(f"       Google ID: {email} ({name})")
+
+    print("=====================================================================")
+    print(" Команды:")
+    print("   gemini-oauth switch <имя_или_номер> — переключить активный аккаунт и порт")
+    print("   gemini-oauth add [имя_профиля]      — добавить новый аккаунт Google (+1 порт)")
+    print("=====================================================================")
+
+
+def cmd_switch(target: str):
+    PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+    profiles = ordered_profile_dirs()
+
+    matched_profile = None
+
+    if target.isdigit():
+        idx = int(target) - 1
+        if 0 <= idx < len(profiles):
+            matched_profile = profiles[idx]
+
+    if not matched_profile:
+        for p in profiles:
+            if p.name.lower() == target.lower():
+                matched_profile = p
+                break
+            info = get_token_info(p / "antigravity-oauth-token")
+            if target.lower() in info.get("email", "").lower():
+                matched_profile = p
+                break
+
+    if not matched_profile:
+        print(f"Ошибка: Профиль '{target}' не найден.")
+        print("Список доступных профилей: gemini-oauth list")
+        return
+
+    source_token = matched_profile / "antigravity-oauth-token"
+    if not source_token.exists():
+        print(f"Ошибка: в профиле '{matched_profile.name}' нет сохраненного токена (авторизация не завершена).")
+        return
+
+    CLI_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Сохраняем текущий активный токен в его профиль перед переключением
+    if ACTIVE_TOKEN.exists():
+        curr_info = get_token_info(ACTIVE_TOKEN)
+        curr_email = curr_info.get("email", "")
+        for p in profiles:
+            if p == matched_profile:
+                continue
+            pt = p / "antigravity-oauth-token"
+            if pt.exists() and get_token_info(pt).get("email") == curr_email:
+                try:
+                    shutil.copy2(ACTIVE_TOKEN, pt)
+                except Exception:
+                    pass
+                break
+
+    shutil.copy2(source_token, ACTIVE_TOKEN)
+
+    port = get_profile_port(matched_profile)
+    info = get_token_info(ACTIVE_TOKEN)
+    email = info.get("email", "")
+
+    # Записываем активный прокси
+    write_active_proxy(port, email, profile_name=matched_profile.name)
+
+    print(f"✓ Успешно переключено на профиль '{matched_profile.name}'!")
+    print(f"  Google ID: {email} ({info.get('name')})")
+    print(f"  Привязанный SOCKS5: 127.0.0.1:{port}")
+
+
+def cmd_add(profile_name: str | None = None):
+    PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+    profiles = ordered_profile_dirs()
+
+    name = profile_name or f"account-{len(profiles) + 1}"
+    target_dir = PROFILES_DIR / name
+
+    if target_dir.exists() and (target_dir / "antigravity-oauth-token").exists():
+        print(f"Профиль '{name}' уже существует с сохраненным токеном. Укажите другое имя.")
+        return
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    assigned_port = get_profile_port(target_dir)
+
+    # 1. Сохраняем текущий активный токен во временный бэкап
+    prev_token_content = None
+    prev_active_profile = None
+    if ACTIVE_TOKEN.exists():
+        try:
+            prev_token_content = ACTIVE_TOKEN.read_bytes()
+            curr_info = get_token_info(ACTIVE_TOKEN)
+            curr_email = curr_info.get("email", "")
+
+            matched_prev = None
+            for p in profiles:
+                if p == target_dir:
+                    continue
+                p_t = p / "antigravity-oauth-token"
+                if p_t.exists() and get_token_info(p_t).get("email") == curr_email:
+                    matched_prev = p
+                    break
+            if not matched_prev:
+                for p in profiles:
+                    if p != target_dir:
+                        matched_prev = p
+                        break
+            if not matched_prev:
+                matched_prev = PROFILES_DIR / "account-1"
+                matched_prev.mkdir(parents=True, exist_ok=True)
+
+            shutil.copy2(ACTIVE_TOKEN, matched_prev / "antigravity-oauth-token")
+            get_profile_port(matched_prev)
+            prev_active_profile = matched_prev
+            print(f"ℹ️  Предыдущий активный аккаунт ({curr_email}) сохранен в профиль '{matched_prev.name}'.")
+        except Exception as e:
+            print(f"Предупреждение при бэкапе текущего токена: {e}")
+
+        ACTIVE_TOKEN.unlink(missing_ok=True)
+
+    # Устанавливаем персональный порт для нового входа
+    write_active_proxy(assigned_port, profile_name=name)
+
+    print("=====================================================================")
+    print(f"  Добавление нового OAuth-аккаунта Google в профиль '{name}'")
+    print(f"  Выделенный порт: 🛡️ SOCKS5 127.0.0.1:{assigned_port}")
+    print("=====================================================================")
+    print("Сейчас запустится 'agy' для авторизации нового аккаунта.")
+    print("1. Перейдите по появившейся ссылке в браузере.")
+    print("2. Войдите в Google аккаунт.")
+    print("3. Как только вход в браузере подтвердится, токен автоматически")
+    print("   будет сохранен в профиль. После этого можно закрыть окно или нажать Ctrl+C.")
+    print("=====================================================================")
+
+    stop_watcher = threading.Event()
+
+    def token_watcher():
+        while not stop_watcher.is_set():
+            if ACTIVE_TOKEN.exists():
+                try:
+                    t_info = get_token_info(ACTIVE_TOKEN)
+                    if t_info.get("email") and t_info.get("email") not in ("Неизвестно", "Ошибка чтения"):
+                        shutil.copy2(ACTIVE_TOKEN, target_dir / "antigravity-oauth-token")
+                        write_active_proxy(assigned_port, t_info.get("email", ""), profile_name=name)
+                        print(f"\n[OK] ✓ Токен аккаунта {t_info.get('email')} успешно перехвачен и сохранен в '{name}'!")
+                        break
+                except Exception:
+                    pass
+            time.sleep(0.5)
+
+    watcher_t = threading.Thread(target=token_watcher, daemon=True)
+    watcher_t.start()
+
+    try:
+        os.system("agy")
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_watcher.set()
+        watcher_t.join(timeout=1.0)
+
+    target_token = target_dir / "antigravity-oauth-token"
+    if ACTIVE_TOKEN.exists() and not target_token.exists():
+        try:
+            shutil.copy2(ACTIVE_TOKEN, target_token)
+            t_info = get_token_info(ACTIVE_TOKEN)
+            write_active_proxy(assigned_port, t_info.get("email", ""), profile_name=name)
+        except Exception:
+            pass
+
+    if target_token.exists():
+        new_info = get_token_info(target_token)
+        print("---------------------------------------------------------------------")
+        print(f"✓ Новый аккаунт успешно привязан к профилю '{name}'!")
+        print(f"  Google ID: {new_info.get('email')} ({new_info.get('name')})")
+        print(f"  Выделенный туннель: SOCKS5 127.0.0.1:{assigned_port}")
+        print("---------------------------------------------------------------------")
+    else:
+        print("✕ Авторизация не была завершена. Токен не сохранен.")
+        try:
+            cfg = target_dir / "profile_config.json"
+            if cfg.exists():
+                cfg.unlink()
+            target_dir.rmdir()
+        except Exception:
+            pass
+        if prev_token_content and not ACTIVE_TOKEN.exists():
+            ACTIVE_TOKEN.write_bytes(prev_token_content)
+            if prev_active_profile:
+                p_port = get_profile_port(prev_active_profile)
+                p_info = get_token_info(ACTIVE_TOKEN)
+                write_active_proxy(p_port, p_info.get("email", ""), profile_name=prev_active_profile.name)
+            print("ℹ️ Восстановлен предыдущий активный аккаунт.")
+
+
+def cmd_next():
+    PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+    all_profiles = ordered_profile_dirs()
+    valid_profiles = [p for p in all_profiles if (p / "antigravity-oauth-token").exists()]
+
+    if not valid_profiles:
+        print("Ошибка: Нет сохраненных профилей с авторизованными токенами.")
+        return
+
+    if len(valid_profiles) == 1:
+        print(f"В системе только 1 активный профиль ({valid_profiles[0].name}). Добавьте второй аккаунт: gemini-oauth add")
+        return
+
+    active_info = get_token_info(ACTIVE_TOKEN)
+    active_email = active_info.get("email", "")
+
+    curr_idx = 0
+    for idx, p in enumerate(valid_profiles):
+        t_info = get_token_info(p / "antigravity-oauth-token")
+        if t_info.get("email") == active_email and active_email:
+            curr_idx = idx
+            break
+
+    next_idx = (curr_idx + 1) % len(valid_profiles)
+    next_profile = valid_profiles[next_idx]
+    cmd_switch(next_profile.name)
+
+
+def cmd_failover_proxy():
+    ps_cmd = "& 'D:\\My files\\herdrControlGui\\.venv\\Scripts\\python.exe' -c 'import gemini_manager; ok, msg, _ = gemini_manager.handle_proxy_failover(gemini_manager.get_active_proxy_port()); print(msg)'"
+    try:
+        res = subprocess.run(
+            [
+                "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+                "-NoProfile",
+                "-Command",
+                ps_cmd,
+            ],
+            capture_output=True, text=True, timeout=12.0
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            print(res.stdout.strip())
+        else:
+            print("✕ Не удалось выполнить автоподбор прокси:", res.stderr.strip() or res.stdout.strip())
+    except Exception as e:
+        print(f"✕ Ошибка вызова менеджера прокси: {e}")
+
+
+def cmd_rename(old_name: str, new_name: str):
+    old_clean = (old_name or "").strip()
+    new_clean = (new_name or "").strip()
+
+    if not new_clean:
+        print("Ошибка: Имя профиля не может быть пустым.")
+        return
+
+    if any(c in r'\/:*?"<>|' for c in new_clean):
+        print("Ошибка: Имя содержит недопустимые символы.")
+        return
+
+    old_dir = PROFILES_DIR / old_clean
+    if not old_dir.exists():
+        print(f"Ошибка: Профиль '{old_clean}' не найден.")
+        return
+
+    new_dir = PROFILES_DIR / new_clean
+    if new_dir.exists():
+        print(f"Ошибка: Профиль с именем '{new_clean}' уже существует.")
+        return
+
+    try:
+        shutil.move(str(old_dir), str(new_dir))
+        cfg_file = new_dir / "profile_config.json"
+        cfg_data = {"profile_name": new_clean}
+        if cfg_file.exists():
+            try:
+                with open(cfg_file, "r", encoding="utf-8") as f:
+                    cfg_data = json.load(f)
+            except Exception:
+                pass
+        cfg_data["profile_name"] = new_clean
+        with open(cfg_file, "w", encoding="utf-8") as f:
+            json.dump(cfg_data, f, indent=2)
+
+        if ACTIVE_PROFILE_JSON.exists():
+            try:
+                with open(ACTIVE_PROFILE_JSON, "r", encoding="utf-8") as f:
+                    act = json.load(f)
+                if act.get("profile_name") == old_clean:
+                    act["profile_name"] = new_clean
+                    with open(ACTIVE_PROFILE_JSON, "w", encoding="utf-8") as f:
+                        json.dump(act, f, indent=2)
+            except Exception:
+                pass
+
+        print(f"✓ Профиль '{old_clean}' успешно переименован в '{new_clean}'!")
+    except Exception as e:
+        print(f"Ошибка переименования: {e}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Google Gemini OAuth Profile Manager")
+    sub = parser.add_subparsers(dest="cmd")
+
+    sub.add_parser("list", help="Список всех OAuth профилей и портов")
+    sub.add_parser("next", help="Переключить на следующий аккаунт по кругу (Round-Robin)")
+    sub.add_parser("failover-proxy", help="Автоподбор резервного SOCKS5-прокси (приоритет той же страны)")
+    
+    p_sw = sub.add_parser("switch", help="Переключить активный аккаунт")
+    p_sw.add_argument("target", help="Номер или имя профиля (например: 1, 2, account-2)")
+
+    p_add = sub.add_parser("add", help="Добавить новый Google аккаунт")
+    p_add.add_argument("name", nargs="?", default=None, help="Имя нового профиля")
+
+    p_ren = sub.add_parser("rename", help="Переименовать Google аккаунт")
+    p_ren.add_argument("old_name", help="Текущее имя профиля")
+    p_ren.add_argument("new_name", help="Новое имя профиля")
+
+    p_guard = sub.add_parser("guard", help="Управление службой автосмены при лимитах (start/stop/status)")
+    p_guard.add_argument("action", choices=["start", "stop", "status", "run"], nargs="?", default="status")
+
+    args = parser.parse_args()
+
+    if not args.cmd or args.cmd == "list":
+        cmd_list()
+    elif args.cmd == "next":
+        cmd_next()
+    elif args.cmd == "failover-proxy":
+        cmd_failover_proxy()
+    elif args.cmd == "switch":
+        cmd_switch(args.target)
+    elif args.cmd == "add":
+        cmd_add(args.name)
+    elif args.cmd == "rename":
+        cmd_rename(args.old_name, args.new_name)
+    elif args.cmd == "guard":
+        os.system(f"gemini-oauth-guard {args.action}")
+
+
+if __name__ == "__main__":
+    main()

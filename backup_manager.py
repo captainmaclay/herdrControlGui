@@ -10,6 +10,7 @@
 - Все настройки GUI, сети и автоподбора (settings.json, proxies.json, .env)
 - Журнал стратегии и истории запусков (strategy_history.json)
 - Все Google OAuth профили, ключи, токены и переменные WSL2 (~/.gemini/profiles/, ~/.gemini/antigravity-cli/)
+- Токены Claude Code и профили Claude OAuth (~/.claude/.credentials.json, ~/.claude/oauth-profiles/)
 """
 
 from __future__ import annotations
@@ -37,22 +38,33 @@ SETTINGS_FILE = BASE_DIR / "settings.json"
 DEFAULT_BACKUP_DIR = Path.home() / "Documents" / "HerdrBackups"
 
 def get_wsl_user(distro: str = "Ubuntu") -> str:
-    """Определяет активного пользователя WSL2."""
-    env_user = os.environ.get("WSL_USER")
-    if env_user:
-        return env_user
-    try:
-        res = subprocess.run(["wsl", "-d", distro, "whoami"], capture_output=True, text=True, timeout=2)
-        if res.returncode == 0 and res.stdout.strip():
-            return res.stdout.strip()
-    except Exception:
-        pass
-    return os.environ.get("USERNAME", "default")
+    """Определяет активного пользователя WSL2 без блокирующих вызовов сети."""
+    return (os.environ.get("WSL_USER") or os.environ.get("USERNAME") or "default").strip()
 
 
 WSL_DISTRO = os.environ.get("WSL_DISTRO", "Ubuntu")
 WSL_USER = get_wsl_user(WSL_DISTRO)
-WSL_GEMINI_DIR = Path(rf"\\wsl$\{WSL_DISTRO}\home\{WSL_USER}\.gemini")
+
+
+def get_wsl_rootfs_path() -> Path | None:
+    """Возвращает путь к WSL2 rootfs через UNC путь \\wsl$\\<distro> или \\wsl.localhost\\<distro>."""
+    for prefix in [rf"\\wsl$\{WSL_DISTRO}", rf"\\wsl.localhost\{WSL_DISTRO}"]:
+        p = Path(prefix)
+        if p.exists():
+            return p
+    return None
+
+
+WSL_ROOT = get_wsl_rootfs_path()
+WSL_HOME = (WSL_ROOT / f"home/{WSL_USER}") if WSL_ROOT else Path(rf"\\wsl$\{WSL_DISTRO}\home\{WSL_USER}")
+WSL_GEMINI_DIR = WSL_HOME / ".gemini"
+WSL_CLAUDE_DIR = WSL_HOME / ".claude"
+WSL_AIONUI_DIR = WSL_HOME / ".aionui-web"
+
+WIN_CLAUDE_DIR = Path.home() / ".claude"
+CLAUDE_OAUTH_PROFILES_DIRNAME = "oauth-profiles"
+CLAUDE_OAUTH_PROFILE_FILES = (".credentials.json", ".claude.json", "profile.json")
+WIN_AIONUI_DIR = Path.home() / ".aionui-web"
 
 MAGIC_HEADER = b"HBAK\x01"  # Herdr Backup Version 1
 PBKDF2_ITERATIONS = 600_000
@@ -125,7 +137,7 @@ def get_backup_config() -> dict[str, Any]:
     """Возвращает настройки бэкапа из settings.json."""
     defaults = {
         "backup_dir": str(DEFAULT_BACKUP_DIR),
-        "auto_backup_enabled": True,
+        "auto_backup_enabled": False,
         "backup_interval_hours": 12,
         "last_backup_time": "-",
     }
@@ -169,6 +181,40 @@ def _derive_key(password: str, salt: bytes) -> bytes:
     return kdf.derive(password.encode("utf-8"))
 
 
+def _safe_write_file(dest_p: Path, content: bytes) -> bool:
+    """Безопасная запись файла с созданием родительских папок и защитой от блокировок."""
+    try:
+        dest_p.parent.mkdir(parents=True, exist_ok=True)
+        tmp_p = dest_p.with_name(dest_p.name + ".restore_tmp")
+        try:
+            with open(tmp_p, "wb") as f:
+                f.write(content)
+            if dest_p.exists():
+                try:
+                    os.replace(tmp_p, dest_p)
+                    return True
+                except Exception:
+                    pass
+            else:
+                os.replace(tmp_p, dest_p)
+                return True
+        except Exception:
+            pass
+        finally:
+            if tmp_p.exists():
+                try:
+                    tmp_p.unlink()
+                except Exception:
+                    pass
+
+        # Fallback прямая запись
+        with open(dest_p, "wb") as f:
+            f.write(content)
+        return True
+    except Exception:
+        return False
+
+
 def create_encrypted_backup(
     password: str,
     target_dir: str | Path | None = None,
@@ -196,12 +242,14 @@ def create_encrypted_backup(
     files_packed = 0
 
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        # 1.1 Файлы Windows
+        # 1.1 Файлы Windows Herdr (настройки, прокси, история, лог интеграций)
         win_files = [
             "settings.json",
             "proxies.json",
             ".env",
             "strategy_history.json",
+            "integrations.log",
+            ".herdr_vault_meta.json",
         ]
         for fn in win_files:
             fp = BASE_DIR / fn
@@ -209,7 +257,70 @@ def create_encrypted_backup(
                 zf.write(fp, arcname=f"win/{fn}")
                 files_packed += 1
 
-        # 1.2 Файлы WSL (~/.gemini/)
+        # 1.2 Файлы Claude Code (Windows)
+        if WIN_CLAUDE_DIR.exists():
+            for fn in [".credentials.json", "settings.json"]:
+                fp = WIN_CLAUDE_DIR / fn
+                if fp.exists():
+                    zf.write(fp, arcname=f"claude/win/{fn}")
+                    files_packed += 1
+            for bak in WIN_CLAUDE_DIR.glob(".credentials.json.bak_*"):
+                if bak.is_file():
+                    zf.write(bak, arcname=f"claude/win/{bak.name}")
+                    files_packed += 1
+
+        # 1.3 Файлы Claude Code (WSL2)
+        if WSL_CLAUDE_DIR.exists():
+            for fn in [".credentials.json", "settings.json"]:
+                fp = WSL_CLAUDE_DIR / fn
+                if fp.exists():
+                    zf.write(fp, arcname=f"claude/wsl/{fn}")
+                    files_packed += 1
+            for bak in WSL_CLAUDE_DIR.glob(".credentials.json.bak_*"):
+                if bak.is_file():
+                    zf.write(bak, arcname=f"claude/wsl/{bak.name}")
+                    files_packed += 1
+
+            # Профили Claude OAuth (~/.claude/oauth-profiles/<имя>/): только токены и метаданные
+            oauth_dir = WSL_CLAUDE_DIR / CLAUDE_OAUTH_PROFILES_DIRNAME
+            if oauth_dir.exists():
+                for prof_dir in sorted(p for p in oauth_dir.iterdir() if p.is_dir()):
+                    for fn in CLAUDE_OAUTH_PROFILE_FILES:
+                        fp = prof_dir / fn
+                        if fp.is_file():
+                            zf.write(fp, arcname=f"claude/wsl/{CLAUDE_OAUTH_PROFILES_DIRNAME}/{prof_dir.name}/{fn}")
+                            files_packed += 1
+
+        # 1.4 Файлы AionUi (WSL2: SQLite база данных, настройки расширений, манифест)
+        if WSL_AIONUI_DIR.exists():
+            for fn in ["aionui-backend.db", "extension-states.json", "extension-user-states.json"]:
+                fp = WSL_AIONUI_DIR / fn
+                if fp.exists():
+                    try:
+                        zf.write(fp, arcname=f"aionui/wsl/{fn}")
+                        files_packed += 1
+                    except Exception:
+                        pass
+            fp_man = WSL_AIONUI_DIR / "resources" / "manifest.json"
+            if fp_man.exists():
+                try:
+                    zf.write(fp_man, arcname="aionui/wsl/resources/manifest.json")
+                    files_packed += 1
+                except Exception:
+                    pass
+
+        # 1.5 Файлы AionUi (Windows)
+        if WIN_AIONUI_DIR.exists():
+            for fn in ["aionui-backend.db", "extension-states.json", "extension-user-states.json"]:
+                fp = WIN_AIONUI_DIR / fn
+                if fp.exists():
+                    try:
+                        zf.write(fp, arcname=f"aionui/win/{fn}")
+                        files_packed += 1
+                    except Exception:
+                        pass
+
+        # 1.6 Файлы WSL Gemini (~/.gemini/)
         if WSL_GEMINI_DIR.exists():
             for root, dirs, files in os.walk(WSL_GEMINI_DIR):
                 root_path = Path(root)
@@ -226,13 +337,20 @@ def create_encrypted_backup(
                     except Exception:
                         pass
 
-        # 1.3 Метаданные бэкапа
+        # 1.7 Метаданные бэкапа
+        b_cfg = get_backup_config()
         manifest = {
-            "version": "1.0",
+            "version": "1.2",
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "files_count": files_packed,
             "host_os": "Windows / WSL2 Ubuntu",
             "password_fingerprint": compute_password_fingerprint(password),
+            "auto_backup_enabled": b_cfg.get("auto_backup_enabled", False),
+            "backup_interval_hours": b_cfg.get("backup_interval_hours", 12),
+            "includes_integrations": True,
+            "includes_claude": True,
+            "includes_claude_oauth_profiles": True,
+            "includes_aionui": True,
         }
         zf.writestr("manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False))
 
@@ -324,21 +442,69 @@ def restore_encrypted_backup(
                 if name.startswith("win/"):
                     rel_name = name[4:]
                     dest_p = BASE_DIR / rel_name
-                    dest_p.parent.mkdir(parents=True, exist_ok=True)
-                    with open(dest_p, "wb") as out_f:
-                        out_f.write(content)
-                    restored_count += 1
+                    if _safe_write_file(dest_p, content):
+                        restored_count += 1
 
                 elif name.startswith("wsl/"):
                     rel_name = name[4:]
                     dest_p = WSL_GEMINI_DIR / rel_name
-                    try:
-                        dest_p.parent.mkdir(parents=True, exist_ok=True)
-                        with open(dest_p, "wb") as out_f:
-                            out_f.write(content)
+                    if _safe_write_file(dest_p, content):
                         restored_count += 1
-                    except Exception:
-                        pass
+
+                elif name.startswith("claude/win/"):
+                    rel_name = name[len("claude/win/"):]
+                    dest_p = WIN_CLAUDE_DIR / rel_name
+                    if _safe_write_file(dest_p, content):
+                        restored_count += 1
+
+                elif name.startswith("claude/wsl/"):
+                    rel_name = name[len("claude/wsl/"):]
+                    dest_p = WSL_CLAUDE_DIR / rel_name
+                    if _safe_write_file(dest_p, content):
+                        restored_count += 1
+
+                elif name.startswith("aionui/wsl/"):
+                    rel_name = name[len("aionui/wsl/"):]
+                    dest_p = WSL_AIONUI_DIR / rel_name
+                    if _safe_write_file(dest_p, content):
+                        restored_count += 1
+
+                elif name.startswith("aionui/win/"):
+                    rel_name = name[len("aionui/win/"):]
+                    dest_p = WIN_AIONUI_DIR / rel_name
+                    if _safe_write_file(dest_p, content):
+                        restored_count += 1
+
+        # Отказоустойчивая валидация и миграция истории стратегий после импорта
+        try:
+            import strategy_manager
+            repaired_history = strategy_manager.load_history()
+            strategy_manager.save_history(repaired_history)
+        except Exception:
+            pass
+
+        # Синхронизация восстановленных настроек Claude Code и Killswitch
+        try:
+            import claude_manager
+            claude_manager.sync_after_restore()
+        except Exception:
+            pass
+
+        # Уведомление в integrations.log о восстановлении
+        try:
+            import integrations_manager
+            integrations_manager.logger.log("Система успешно восстановлена из зашифрованной резервной копии .hbak", "SUCCESS")
+        except Exception:
+            pass
+
+        # Восстановление параметров автобэкапа из манифеста
+        try:
+            if "auto_backup_enabled" in manifest:
+                update_backup_config("auto_backup_enabled", bool(manifest["auto_backup_enabled"]))
+            if "backup_interval_hours" in manifest:
+                update_backup_config("backup_interval_hours", int(manifest["backup_interval_hours"]))
+        except Exception:
+            pass
 
         msg = (
             f"✓ Бэкап успешно восстановлен!\n"
@@ -384,7 +550,7 @@ def list_backups_in_dir(target_dir: str | Path | None = None) -> list[dict[str, 
 def check_and_run_auto_backup() -> tuple[bool, str]:
     """Проверяет необходимость выполнения периодического автобэкапа."""
     cfg = get_backup_config()
-    if not cfg.get("auto_backup_enabled", True):
+    if not cfg.get("auto_backup_enabled", False):
         return False, "Автобэкап выключен"
 
     password = load_backup_password()
@@ -417,30 +583,52 @@ def wipe_all_data() -> tuple[bool, str]:
         subprocess.run(
             ["wsl", "-d", WSL_DISTRO, "-u", WSL_USER, "bash", "-lic", "gemini-oauth guard stop"],
             capture_output=True, text=True, timeout=3.5,
+            encoding="utf-8", errors="replace",
             creationflags=0x08000000 if os.name == "nt" else 0
         )
     except Exception:
         pass
 
-    # 2. Очистка WSL токенов и профилей
+    # 2. Очистка WSL токенов, профилей и метаданных
+    import token_meta_cache
+    
+    # 2.1 Gemini
     try:
         profiles_dir = WSL_GEMINI_DIR / "profiles"
         if profiles_dir.exists():
-            shutil.rmtree(profiles_dir, ignore_errors=True)
-            cleared_items.append("WSL Profiles")
+            import shutil
+            shutil.rmtree(str(profiles_dir), ignore_errors=True)
+            cleared_items.append("Gemini Аккаунты")
 
         cli_dir = WSL_GEMINI_DIR / "antigravity-cli"
         if cli_dir.exists():
-            for f in ["antigravity-oauth-token", "active_profile.json", "active_proxy.env", "guard.log", "cli.log", "guard.pid"]:
-                target = cli_dir / f
-                if target.exists():
+            import os
+            for filename in os.listdir(str(cli_dir)):
+                fpath = cli_dir / filename
+                if fpath.is_file():
                     try:
-                        target.unlink(missing_ok=True)
+                        fpath.unlink(missing_ok=True)
                     except Exception:
                         pass
-            cleared_items.append("WSL Tokens & Logs")
     except Exception as e:
-        errors.append(f"WSL: {e}")
+        errors.append(f"Gemini: {e}")
+
+    # 2.2 Claude
+    try:
+        if WSL_CLAUDE_DIR.exists():
+            import shutil
+            shutil.rmtree(str(WSL_CLAUDE_DIR), ignore_errors=True)
+            cleared_items.append("Claude Аккаунты")
+    except Exception as e:
+        errors.append(f"Claude: {e}")
+
+    # 2.3 Метаданные хранилища
+    try:
+        meta_file = token_meta_cache.META_FILE
+        if meta_file.exists():
+            meta_file.unlink(missing_ok=True)
+    except Exception:
+        pass
 
     # 3. Очистка локальных файлов Windows
     # 3.1 strategy_history.json
@@ -495,7 +683,7 @@ def wipe_all_data() -> tuple[bool, str]:
             "auto_proxy_failover": True,
             "auto_refresh_routes": True,
             "backup_dir": str(DEFAULT_BACKUP_DIR),
-            "auto_backup_enabled": True,
+            "auto_backup_enabled": False,
             "backup_interval_hours": 12,
             "last_backup_time": "-",
         }
@@ -506,7 +694,7 @@ def wipe_all_data() -> tuple[bool, str]:
         errors.append(f"settings.json: {e}")
 
     # 3.5 Локальные лог-файлы
-    for log_name in ["debug.log", "stdout.log", "stderr.log"]:
+    for log_name in ["debug.log", "stdout.log", "stderr.log", "integrations.log", "extended.log"]:
         lp = BASE_DIR / log_name
         if lp.exists():
             try:

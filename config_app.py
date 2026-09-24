@@ -22,28 +22,32 @@
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
 import socket
 import sys
+import extended_logger
+extended_logger.init_extended_logging()
+
 import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
-from pathlib import Path
 import traceback
 
 BASE_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE_DIR))
 
-# Защита от сбоев в pythonw
+# Защита от сбоев в pythonw и логирование ошибок запуска
 if sys.stdout is None:
     try:
-        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+        sys.stdout = open(BASE_DIR / "stdout.log", "a", encoding="utf-8")
     except Exception:
         pass
 if sys.stderr is None:
     try:
-        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+        sys.stderr = open(BASE_DIR / "stderr.log", "a", encoding="utf-8")
     except Exception:
         pass
 
@@ -53,6 +57,10 @@ import gemini_manager
 import settings_manager
 import strategy_manager
 import backup_manager
+import claude_manager
+import claude_oauth_manager
+import integrations_manager
+import token_vault_manager
 import i18n
 from i18n import t
 
@@ -60,8 +68,14 @@ try:
     from PIL import Image, ImageDraw
     import pystray
     HAS_TRAY = True
-except ImportError:
+except Exception as e:
     HAS_TRAY = False
+    try:
+        if sys.stderr:
+            sys.stderr.write(f"pystray import failed: {e}\n")
+            sys.stderr.flush()
+    except Exception:
+        pass
 
 # ── Цветовая палитра Catppuccin Mocha ──────────────────────────────────────
 C = {
@@ -74,10 +88,12 @@ C = {
     "accent_blue": "#89b4fa",
     "accent_peach":"#fab387",
     "accent_mauve":"#cba6f7",
+    "accent_hover":"#f5c2e7",
     "green":       "#a6e3a1",
     "red":         "#f38ba8",
     "yellow":      "#f9e2af",
     "border":      "#313244",
+    "input_bg":    "#181825",
     "tag_bg":      "#2a2a3e",
     "tag_fg":      "#b4befe",
     "table_header":"#212133",
@@ -95,15 +111,29 @@ FONT_MONO_BOLD = ("Consolas", 9, "bold")
 SINGLE_INSTANCE_PORT = 38123
 
 
-def make_tray_icon():
-    """Генерация стильной иконки 'H' для трея."""
+def make_tray_icon(color: str = "blue"):
+    """Генерация яркой, контрастной иконки 'H' для системного трея."""
     size = 64
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.rounded_rectangle([2, 2, size - 3, size - 3], radius=14, fill="#1e1e2e", outline="#89b4fa", width=3)
-    d.rectangle([16, 14, 24, 50], fill="#89b4fa")
-    d.rectangle([40, 14, 48, 50], fill="#89b4fa")
-    d.rectangle([24, 28, 40, 36], fill="#89b4fa")
+    colors = {
+        "blue":   ("#89b4fa", "#1e1e2e"),
+        "green":  ("#a6e3a1", "#1e1e2e"),
+        "red":    ("#f38ba8", "#1e1e2e"),
+        "yellow": ("#f9e2af", "#1e1e2e"),
+    }
+    bg_col, fg_col = colors.get(color, colors["blue"])
+
+    margin = 3
+    d.rounded_rectangle([margin, margin, size - margin, size - margin], radius=16, fill=bg_col, outline="#ffffff", width=2)
+
+    x1, x2 = 18, 26
+    x3, x4 = 38, 46
+    y_t, y_b = 16, 48
+    ym_t, ym_b = 28, 36
+    d.rounded_rectangle([x1, y_t, x2, y_b], radius=3, fill=fg_col)
+    d.rounded_rectangle([x3, y_t, x4, y_b], radius=3, fill=fg_col)
+    d.rectangle([x2, ym_t, x3, ym_b], fill=fg_col)
     return img
 
 
@@ -115,6 +145,15 @@ class HerdrConfigApp(tk.Tk):
         self.geometry("920x720")
         self.minsize(860, 640)
         self.configure(bg=C["bg"])
+
+        icon_path = BASE_DIR / "app_icon.ico"
+        if not icon_path.exists() and getattr(sys, "_MEIPASS", None):
+            icon_path = Path(sys._MEIPASS) / "app_icon.ico"
+        if icon_path.exists():
+            try:
+                self.iconbitmap(str(icon_path))
+            except Exception:
+                pass
 
         self.tray_icon = None
         self.protocol("WM_DELETE_WINDOW", self.on_close_button)
@@ -136,16 +175,17 @@ class HerdrConfigApp(tk.Tk):
 
         # Состояние Backup
         b_cfg = backup_manager.get_backup_config()
+        self._suppress_backup_trace = False
         self.backup_password_var = tk.StringVar(value=backup_manager.load_backup_password())
         self.backup_dir_var = tk.StringVar(value=b_cfg.get("backup_dir", str(backup_manager.DEFAULT_BACKUP_DIR)))
         self.backup_interval_var = tk.IntVar(value=b_cfg.get("backup_interval_hours", 12))
-        self.auto_backup_enabled_var = tk.BooleanVar(value=b_cfg.get("auto_backup_enabled", True))
+        self.auto_backup_enabled_var = tk.BooleanVar(value=b_cfg.get("auto_backup_enabled", False))
         self.backup_pw_show = False
 
         self.backup_password_var.trace_add("write", self._on_backup_password_changed)
-        self.backup_dir_var.trace_add("write", lambda *_: backup_manager.update_backup_config("backup_dir", self.backup_dir_var.get()))
-        self.backup_interval_var.trace_add("write", lambda *_: backup_manager.update_backup_config("backup_interval_hours", self.backup_interval_var.get()))
-        self.auto_backup_enabled_var.trace_add("write", lambda *_: backup_manager.update_backup_config("auto_backup_enabled", self.auto_backup_enabled_var.get()))
+        self.backup_dir_var.trace_add("write", lambda *_: getattr(self, "_suppress_backup_trace", False) or backup_manager.update_backup_config("backup_dir", self.backup_dir_var.get()))
+        self.backup_interval_var.trace_add("write", lambda *_: getattr(self, "_suppress_backup_trace", False) or backup_manager.update_backup_config("backup_interval_hours", self.backup_interval_var.get()))
+        self.auto_backup_enabled_var.trace_add("write", lambda *_: getattr(self, "_suppress_backup_trace", False) or backup_manager.update_backup_config("auto_backup_enabled", self.auto_backup_enabled_var.get()))
 
         # Состояние прокси
         self.proxies: list[dict] = []
@@ -156,18 +196,32 @@ class HerdrConfigApp(tk.Tk):
         self.gemini_profiles: list[dict] = []
         self.is_checking_gemini = False
 
+        # Состояние и логгер интеграций
+        self._integ_task_running = False
+        self._on_integration_log_cb = self._on_integration_log
+        integrations_manager.logger.add_listener(self._on_integration_log_cb)
+
         self._build_ui()
         if HAS_TRAY:
             self._init_tray()
+
+        # Enforcement: 99% времени в зашифрованом состоянии при старте.
+        token_vault_manager.ensure_locked()
 
         # Первоначальная загрузка данных
         self.load_proxies_data()
         self.load_gemini_profiles_data()
 
+        # Быстрый мониторинг портов и Killswitch
+        self._closing = False
+        self._is_checking_fast_ports = False
+        self._last_claude_accessible = None
+        self.after(1000, self._schedule_fast_port_check)
+
         # Запуск проверки маршрутов
         self.after(300, self.refresh_routes_async)
 
-        # Автообновление каждые 30 секунд
+        # Периодическое полное обновление маршрутов (каждые 15 секунд)
         self._schedule_auto_refresh()
 
         # На передний план
@@ -215,8 +269,10 @@ class HerdrConfigApp(tk.Tk):
             ("routes", t("tab_routes")),
             ("proxy", t("tab_proxy")),
             ("gemini", t("tab_gemini")),
+            ("claude_oauth", t("tab_claude_oauth")),
             ("strategy", t("tab_strategy")),
             ("backup", t("tab_backup")),
+            ("integrations", t("tab_integrations")),
             ("localization", t("tab_localization")),
         ]
 
@@ -246,15 +302,19 @@ class HerdrConfigApp(tk.Tk):
         self.page_routes = tk.Frame(self.pages_container, bg=C["bg"])
         self.page_proxy = tk.Frame(self.pages_container, bg=C["bg"])
         self.page_gemini = tk.Frame(self.pages_container, bg=C["bg"])
+        self.page_claude_oauth = tk.Frame(self.pages_container, bg=C["bg"])
         self.page_strategy = tk.Frame(self.pages_container, bg=C["bg"])
         self.page_backup = tk.Frame(self.pages_container, bg=C["bg"])
+        self.page_integrations = tk.Frame(self.pages_container, bg=C["bg"])
         self.page_localization = tk.Frame(self.pages_container, bg=C["bg"])
 
         self._build_page_routes(self.page_routes)
         self._build_page_proxy(self.page_proxy)
         self._build_page_gemini(self.page_gemini)
+        self._build_page_claude_oauth(self.page_claude_oauth)
         self._build_page_strategy(self.page_strategy)
         self._build_page_backup(self.page_backup)
+        self._build_page_integrations(self.page_integrations)
         self._build_page_localization(self.page_localization)
 
         # Отображаем первую страницу по умолчанию
@@ -295,7 +355,7 @@ class HerdrConfigApp(tk.Tk):
         self.active_tab = page_id
 
         # Скрываем все страницы
-        for p in (self.page_routes, self.page_proxy, self.page_gemini, self.page_strategy, self.page_backup, self.page_localization):
+        for p in (self.page_routes, self.page_proxy, self.page_gemini, self.page_claude_oauth, self.page_strategy, self.page_backup, self.page_integrations, self.page_localization):
             p.pack_forget()
 
         # Стили кнопок вкладок
@@ -308,18 +368,28 @@ class HerdrConfigApp(tk.Tk):
         # Показываем выбранную страницу
         if page_id == "routes":
             self.page_routes.pack(fill="both", expand=True)
+            self._update_claude_proxy_combo()
         elif page_id == "proxy":
+            self.load_proxies_data()
             self.page_proxy.pack(fill="both", expand=True)
             self.render_proxy_table()
         elif page_id == "gemini":
             self.page_gemini.pack(fill="both", expand=True)
             self.render_gemini_page()
+        elif page_id == "claude_oauth":
+            self.page_claude_oauth.pack(fill="both", expand=True)
+            self.render_claude_oauth_page()
+            self.refresh_claude_profiles_async()
         elif page_id == "strategy":
+            self.load_gemini_profiles_data()
             self.page_strategy.pack(fill="both", expand=True)
             self.render_strategy_page()
         elif page_id == "backup":
             self.page_backup.pack(fill="both", expand=True)
             self.render_backup_page()
+        elif page_id == "integrations":
+            self.page_integrations.pack(fill="both", expand=True)
+            self.render_integrations_page()
         elif page_id == "localization":
             self.page_localization.pack(fill="both", expand=True)
             self.render_localization_page()
@@ -573,18 +643,76 @@ class HerdrConfigApp(tk.Tk):
 
         tk.Label(head, text=t("claude_route_title"), font=FONT_TITLE, fg=C["accent_peach"], bg=C["card"]).pack(side="left")
 
-        pill = tk.Label(
-            head, text=t("pill_direct"), font=FONT_BOLD,
+        self.claude_pill = tk.Label(
+            head, text=t("pill_claude_proxy"), font=FONT_BOLD,
             bg=C["accent_peach"], fg="#11111b", padx=8, pady=2
         )
-        pill.pack(side="right")
+        self.claude_pill.pack(side="right")
 
         self.claude_status_lbl = tk.Label(
             pad, text=t("claude_checking"), font=FONT_MAIN,
             fg=C["yellow"], bg=C["card"], anchor="w"
         )
-        self.claude_status_lbl.pack(fill="x", pady=(0, 4))
+        self.claude_status_lbl.pack(fill="x", pady=(0, 6))
 
+        # Настройки прокси Claude и Killswitch
+        cfg_frame = tk.Frame(pad, bg=C["card_inner"], bd=1, relief="solid")
+        cfg_frame.configure(highlightbackground=C["border"], highlightthickness=1)
+        cfg_frame.pack(fill="x", pady=(0, 6))
+
+        cfg_in = tk.Frame(cfg_frame, bg=C["card_inner"])
+        cfg_in.pack(fill="x", padx=12, pady=6)
+
+        # Строка 1: Host, Port, Выбор из списка, Кнопка Сохранить
+        row_cfg = tk.Frame(cfg_in, bg=C["card_inner"])
+        row_cfg.pack(fill="x", pady=2)
+
+        tk.Label(row_cfg, text=t("lbl_claude_proxy_host"), font=FONT_BOLD, fg=C["subtext"], bg=C["card_inner"]).pack(side="left")
+        self.claude_host_var = tk.StringVar(value=settings_manager.get_claude_proxy_host())
+        self.claude_host_entry = tk.Entry(
+            row_cfg, textvariable=self.claude_host_var, font=FONT_MONO,
+            bg=C["input_bg"], fg=C["fg"], insertbackground=C["fg"],
+            bd=1, relief="solid", highlightthickness=1, highlightbackground=C["border"], width=13
+        )
+        self.claude_host_entry.pack(side="left", padx=(4, 12))
+
+        tk.Label(row_cfg, text=t("lbl_claude_proxy_port"), font=FONT_BOLD, fg=C["subtext"], bg=C["card_inner"]).pack(side="left")
+        self.claude_port_var = tk.StringVar(value=str(settings_manager.get_claude_proxy_port()))
+        self.claude_port_entry = tk.Entry(
+            row_cfg, textvariable=self.claude_port_var, font=FONT_MONO,
+            bg=C["input_bg"], fg=C["fg"], insertbackground=C["fg"],
+            bd=1, relief="solid", highlightthickness=1, highlightbackground=C["border"], width=6
+        )
+        self.claude_port_entry.pack(side="left", padx=(4, 12))
+
+        # Выбор из списка существующих прокси
+        self.claude_proxy_combo = ttk.Combobox(row_cfg, width=30, state="readonly")
+        self._update_claude_proxy_combo()
+        self.claude_proxy_combo.pack(side="left", padx=(0, 10))
+        self.claude_proxy_combo.bind("<<ComboboxSelected>>", self._on_claude_combo_selected)
+
+        # Кнопка применить
+        self.claude_save_btn = tk.Button(
+            row_cfg, text=t("btn_claude_save"), font=FONT_BOLD,
+            bg=C["accent_peach"], fg="#11111b", activebackground=C["accent_hover"],
+            activeforeground="#11111b", bd=0, padx=8, pady=2, cursor="hand2",
+            command=self._save_claude_settings_action
+        )
+        self.claude_save_btn.pack(side="left", padx=(0, 12))
+
+        # Чекбокс Killswitch
+        self.claude_killswitch_var = tk.BooleanVar(value=settings_manager.get_claude_killswitch())
+        self.claude_ks_cb = tk.Checkbutton(
+            cfg_in, text=t("lbl_claude_killswitch"),
+            variable=self.claude_killswitch_var,
+            font=FONT_BOLD, fg=C["red"] if self.claude_killswitch_var.get() else C["subtext"],
+            bg=C["card_inner"], activebackground=C["card_inner"],
+            activeforeground=C["fg"], selectcolor=C["input_bg"],
+            cursor="hand2", command=self._on_claude_killswitch_toggle
+        )
+        self.claude_ks_cb.pack(anchor="w", pady=(4, 2))
+
+        # Детали маршрута
         details_frame = tk.Frame(pad, bg=C["card_inner"], bd=1, relief="solid")
         details_frame.configure(highlightbackground=C["border"], highlightthickness=1)
         details_frame.pack(fill="x", pady=(2, 0))
@@ -595,7 +723,12 @@ class HerdrConfigApp(tk.Tk):
         r1 = tk.Frame(d_in, bg=C["card_inner"])
         r1.pack(fill="x", pady=1)
         tk.Label(r1, text="Маршрут:", font=FONT_BOLD, fg=C["subtext"], bg=C["card_inner"], width=14, anchor="w").pack(side="left")
-        tk.Label(r1, text=t("route_direct_val"), font=FONT_MAIN, fg=C["fg"], bg=C["card_inner"]).pack(side="left")
+        self.claude_route_lbl = tk.Label(
+            r1,
+            text=f"http://{settings_manager.get_claude_proxy_host()}:{10000 + settings_manager.get_claude_proxy_port()}",
+            font=FONT_MAIN, fg=C["fg"], bg=C["card_inner"]
+        )
+        self.claude_route_lbl.pack(side="left")
 
         r2 = tk.Frame(d_in, bg=C["card_inner"])
         r2.pack(fill="x", pady=1)
@@ -618,6 +751,67 @@ class HerdrConfigApp(tk.Tk):
         ).pack(side="left")
 
         return card
+
+    def _update_claude_proxy_combo(self, refresh_status: bool = False):
+        try:
+            proxies = proxy_manager.load_proxies(refresh_status=refresh_status)
+            items = []
+            cur_p = str(self.claude_port_var.get()).strip() if hasattr(self, "claude_port_var") else ""
+            cur_h = str(self.claude_host_var.get()).strip() if hasattr(self, "claude_host_var") else "127.0.0.1"
+            matched_val = None
+
+            for p in proxies:
+                port = p.get("port")
+                host = p.get("host", "127.0.0.1")
+                st = p.get("status", "unknown")
+                lbl = p.get("label", "")
+                if lbl:
+                    item_text = f"{host}:{port} - {lbl} ({st})"
+                else:
+                    item_text = f"{host}:{port} ({st})"
+                items.append(item_text)
+
+                if str(port) == cur_p:
+                    matched_val = item_text
+
+            if hasattr(self, "claude_proxy_combo"):
+                self.claude_proxy_combo["values"] = items
+                if matched_val:
+                    self.claude_proxy_combo.set(matched_val)
+                elif items and not self.claude_proxy_combo.get():
+                    self.claude_proxy_combo.set(items[0])
+        except Exception:
+            pass
+
+    def _on_claude_combo_selected(self, event=None):
+        val = self.claude_proxy_combo.get()
+        if val and ":" in val:
+            token = val.split(" ")[0].strip()
+            parts = token.split(":")
+            if len(parts) == 2:
+                self.claude_host_var.set(parts[0])
+                self.claude_port_var.set(parts[1])
+                self._save_claude_settings_action()
+
+    def _on_claude_killswitch_toggle(self):
+        self._save_claude_settings_action()
+
+    def _save_claude_settings_action(self):
+        h = self.claude_host_var.get().strip() or "127.0.0.1"
+        try:
+            p = int(self.claude_port_var.get().strip())
+        except ValueError:
+            messagebox.showerror(t("error_title"), "Порт должен быть целым числом!")
+            return
+        ks = bool(self.claude_killswitch_var.get())
+        self._last_claude_accessible = None
+        claude_manager.save_claude_config(h, p, ks)
+        proxy_manager.set_proxy_claude_flag(p, True)
+        self.proxies = proxy_manager.load_proxies()
+        self.claude_route_lbl.config(text=f"http://{h}:{10000 + p} (SOCKS5 :{p})")
+        if hasattr(self, "claude_ks_cb"):
+            self.claude_ks_cb.config(fg=C["red"] if ks else C["subtext"])
+        self.refresh_routes_async()
 
     # =========================================================================
     # СТРАНИЦА 2: SOCKS5 ПРОКСИ
@@ -696,15 +890,16 @@ class HerdrConfigApp(tk.Tk):
         tbl_head.pack_propagate(False)
 
         headers = [
-            ("СТАТУС", 12),
-            ("ХОСТ : ПОРТ", 22),
-            ("ВНЕШНИЙ IP", 18),
-            ("СТРАНА", 20),
-            ("ОТКЛИК", 12),
-            ("ДЕЙСТВИЯ", 16),
+            (t("col_status"), 11),
+            (t("col_port"), 20),
+            (t("col_ip"), 17),
+            (t("col_country"), 18),
+            (t("col_latency"), 10),
+            (t("col_claude"), 10),
+            (t("col_actions"), 14),
         ]
         for h_text, h_width in headers:
-            align = "center" if h_text in ("СТАТУС", "ДЕЙСТВИЯ", "ОТКЛИК") else "w"
+            align = "center" if h_text in (t("col_status"), t("col_latency"), t("col_claude"), t("col_actions"), "СТАТУС", t("col_claude"), "ДЕЙСТВИЯ", "ОТКЛИК") else "w"
             tk.Label(
                 tbl_head, text=h_text, font=FONT_BOLD,
                 fg=C["subtext"], bg=C["table_header"], width=h_width, anchor=align
@@ -745,8 +940,8 @@ class HerdrConfigApp(tk.Tk):
         self.btn_next_page.pack(side="left", pady=8)
 
     def load_proxies_data(self):
-        """Загрузка списка прокси из файла."""
-        self.proxies = proxy_manager.load_proxies()
+        """Загрузка списка прокси из файла с проверкой реального статуса локальных портов."""
+        self.proxies = proxy_manager.load_proxies(refresh_status=True)
 
     def render_proxy_table(self):
         """Отрисовка 10 строк текущей страницы."""
@@ -756,6 +951,10 @@ class HerdrConfigApp(tk.Tk):
         page_items, total_pages = proxy_manager.get_paginated_proxies(
             self.proxies, self.current_proxy_page, proxy_manager.PAGE_SIZE
         )
+
+        # Гарантируем актуальный статус локальных портов перед отрисовкой таблицы
+        if proxy_manager.refresh_local_ports_status(page_items):
+            proxy_manager.save_proxies(self.proxies)
 
         # Обновляем текст пагинации
         total_count = len(self.proxies)
@@ -794,14 +993,14 @@ class HerdrConfigApp(tk.Tk):
             # 1. Статус
             tk.Label(
                 row, text=st_text, font=FONT_BOLD,
-                fg=st_color, bg=bg_color, width=12, anchor="center"
+                fg=st_color, bg=bg_color, width=11, anchor="center"
             ).pack(side="left", padx=4)
 
             # 2. Хост:Порт
             host_port = f"{item.get('host', '127.0.0.1')}:{item.get('port', 1081)}"
             tk.Label(
                 row, text=host_port, font=FONT_MONO_BOLD,
-                fg=C["fg"], bg=bg_color, width=22, anchor="w"
+                fg=C["fg"], bg=bg_color, width=20, anchor="w"
             ).pack(side="left", padx=4)
 
             # 3. IP
@@ -809,7 +1008,7 @@ class HerdrConfigApp(tk.Tk):
             tk.Label(
                 row, text=ip_str, font=FONT_MONO,
                 fg=C["accent_peach"] if ip_str != "-" else C["subtext"],
-                bg=bg_color, width=18, anchor="w"
+                bg=bg_color, width=17, anchor="w"
             ).pack(side="left", padx=4)
 
             # 4. Страна (при невозможности определить — строго undefined!)
@@ -817,7 +1016,7 @@ class HerdrConfigApp(tk.Tk):
             c_color = C["tag_fg"] if country_str != "undefined" else C["yellow"]
             tk.Label(
                 row, text=country_str, font=FONT_MAIN,
-                fg=c_color, bg=bg_color, width=20, anchor="w"
+                fg=c_color, bg=bg_color, width=18, anchor="w"
             ).pack(side="left", padx=4)
 
             # 5. Пинг
@@ -825,11 +1024,28 @@ class HerdrConfigApp(tk.Tk):
             lat_str = f"{lat} ms" if lat is not None else "-"
             tk.Label(
                 row, text=lat_str, font=FONT_MONO,
-                fg=C["subtext"], bg=bg_color, width=12, anchor="center"
+                fg=C["subtext"], bg=bg_color, width=10, anchor="center"
             ).pack(side="left", padx=4)
 
-            # 6. Действия
-            actions = tk.Frame(row, bg=bg_color, width=16)
+            # 6. Флаг Claude
+            claude_frame = tk.Frame(row, bg=bg_color, width=10)
+            claude_frame.pack(side="left", padx=4)
+            is_claude = bool(item.get("claude", False))
+            claude_var = tk.BooleanVar(value=is_claude)
+            cb_claude = tk.Checkbutton(
+                claude_frame, text="Claude",
+                variable=claude_var,
+                font=FONT_BOLD,
+                fg=C["accent_peach"] if is_claude else C["subtext"],
+                bg=bg_color, activebackground=bg_color,
+                activeforeground=C["accent_peach"],
+                selectcolor=C["card_inner"], bd=0, cursor="hand2",
+                command=lambda p=item, v=claude_var: self.on_toggle_proxy_claude(p, v)
+            )
+            cb_claude.pack(anchor="center")
+
+            # 7. Действия
+            actions = tk.Frame(row, bg=bg_color, width=14)
             actions.pack(side="left", padx=4)
 
             btn_check = tk.Button(
@@ -847,6 +1063,39 @@ class HerdrConfigApp(tk.Tk):
                 command=lambda pid=item.get("id"): self.on_delete_proxy(pid)
             )
             btn_del.pack(side="left")
+
+    def on_toggle_proxy_claude(self, proxy_item: dict, var: tk.BooleanVar):
+        """Переключение флага Claude для прокси."""
+        val = bool(var.get())
+        proxy_item["claude"] = val
+        port = proxy_item.get("port")
+        for p in self.proxies:
+            if p.get("id") == proxy_item.get("id") or p.get("port") == port:
+                p["claude"] = val
+                break
+        proxy_manager.save_proxies(self.proxies)
+
+        # Если включили флаг Claude для прокси, обновляем настройки Claude на карточке Routes
+        if val:
+            self._last_claude_accessible = None
+            h = proxy_item.get("host", "127.0.0.1")
+            p_num = proxy_item.get("port", 1015)
+            ks = settings_manager.get_claude_killswitch()
+            claude_manager.save_claude_config(h, p_num, ks)
+            if hasattr(self, "claude_host_var"):
+                self.claude_host_var.set(h)
+            if hasattr(self, "claude_port_var"):
+                self.claude_port_var.set(str(p_num))
+            self._update_claude_proxy_combo()
+            self.refresh_routes_async()
+            # Прокси с флагом Claude строго не должны использоваться в Gemini:
+            gemini_manager.reassign_profiles_using_claude_proxies()
+            if hasattr(self, "load_gemini_profiles_data"):
+                self.load_gemini_profiles_data()
+            if hasattr(self, "gemini_cards_frame") and self.gemini_cards_frame.winfo_exists():
+                self.render_gemini_page()
+
+        self.render_proxy_table()
 
     def on_add_proxy_click(self):
         """Добавляет новый прокси с авто-инкрементом порта."""
@@ -922,6 +1171,8 @@ class HerdrConfigApp(tk.Tk):
                 self.is_checking_proxies = False
                 self.btn_check_proxies.config(state="normal", text=t("btn_check_all_proxies"))
                 self.render_proxy_table()
+                self._update_claude_proxy_combo()
+                self.refresh_routes_async()
 
             self.after(0, update_ui)
 
@@ -951,6 +1202,14 @@ class HerdrConfigApp(tk.Tk):
 
         btn_box = tk.Frame(g_top, bg=C["bg"])
         btn_box.pack(side="right")
+
+        self.btn_reset_order = tk.Button(
+            btn_box, text=t("btn_reset_proxies_order"), font=FONT_BOLD,
+            bg=C["card_inner"], fg=C["accent_peach"], activebackground=C["border"],
+            bd=0, padx=10, pady=6, cursor="hand2",
+            command=self.on_reset_gemini_proxies_order
+        )
+        self.btn_reset_order.pack(side="left", padx=(0, 8))
 
         self.btn_refresh_gemini = tk.Button(
             btn_box, text="🔄 Обновить профили", font=FONT_BOLD,
@@ -1090,7 +1349,7 @@ class HerdrConfigApp(tk.Tk):
         # 1. Обновляем карточку текущего активного аккаунта
         active_prof = next((p for p in self.gemini_profiles if p.get("is_active")), None)
         if active_prof:
-            port = active_prof.get("port", 1081)
+            port = active_prof.get("port", gemini_manager.BASE_SOCKS5_PORT)
             p_ip = active_prof.get("proxy_ip", "-")
             p_co = active_prof.get("proxy_country", "undefined")
             self.spotlight_email_lbl.config(
@@ -1139,7 +1398,7 @@ class HerdrConfigApp(tk.Tk):
             email = prof.get("email", "Без email")
             user_name = prof.get("name", "Пользователь")
             expiry = prof.get("expiry_text", "-")
-            port = prof.get("port", 1081)
+            port = prof.get("port", gemini_manager.BASE_SOCKS5_PORT)
             p_st = prof.get("proxy_status", "unknown")
             p_ip = prof.get("proxy_ip", "-")
             p_co = prof.get("proxy_country", "undefined")
@@ -1152,6 +1411,28 @@ class HerdrConfigApp(tk.Tk):
             c_in = tk.Frame(card, bg=C["card"])
             c_in.pack(fill="both", expand=True, padx=14, pady=10)
 
+            # Номер профиля (#1, #2...): определяет порт; меняется стрелками или кликом по номеру
+            position = prof.get("position", 1)
+            total = len(self.gemini_profiles)
+            num_col = tk.Frame(c_in, bg=C["card"])
+            num_col.pack(side="left", padx=(0, 12))
+            nav_btn = dict(font=FONT_SUB, bg=C["card"], fg=C["subtext"], activebackground=C["card_inner"],
+                           activeforeground=C["accent_blue"], bd=0, padx=4, pady=0, cursor="hand2", relief="flat")
+            tk.Button(
+                num_col, text="▲", state="normal" if position > 1 else "disabled",
+                command=lambda name=p_name, pos=position: self.on_change_gemini_position(name, pos - 1), **nav_btn
+            ).pack()
+            tk.Button(
+                num_col, text=f"#{position}", font=FONT_APP_TITLE,
+                bg=C["card_inner"], fg=C["accent_blue"], activebackground=C["border"], activeforeground=C["fg"],
+                bd=0, padx=8, pady=2, cursor="hand2", relief="flat",
+                command=lambda name=p_name: self.on_change_gemini_position(name)
+            ).pack()
+            tk.Button(
+                num_col, text="▼", state="normal" if position < total else "disabled",
+                command=lambda name=p_name, pos=position: self.on_change_gemini_position(name, pos + 1), **nav_btn
+            ).pack()
+
             # Левая колонка: Инфо
             left = tk.Frame(c_in, bg=C["card"])
             left.pack(side="left", fill="both", expand=True)
@@ -1159,10 +1440,19 @@ class HerdrConfigApp(tk.Tk):
             t_line = tk.Frame(left, bg=C["card"])
             t_line.pack(fill="x")
 
+            title_text = p_name
             tk.Label(
-                t_line, text=email, font=FONT_TITLE,
+                t_line, text=title_text, font=FONT_TITLE,
                 fg=C["fg"], bg=C["card"]
             ).pack(side="left")
+
+            btn_rename_inline = tk.Button(
+                t_line, text="✏️", font=FONT_SUB,
+                bg=C["card"], fg=C["subtext"], activebackground=C["card_inner"], activeforeground=C["accent_blue"],
+                bd=0, padx=4, pady=0, cursor="hand2", relief="flat",
+                command=lambda name=p_name: self.on_rename_gemini_profile(name)
+            )
+            btn_rename_inline.pack(side="left", padx=(4, 0))
 
             if is_active:
                 tk.Label(
@@ -1175,10 +1465,15 @@ class HerdrConfigApp(tk.Tk):
                     fg=C["subtext"], bg=C["card_inner"], padx=6, pady=1
                 ).pack(side="left", padx=(8, 0))
 
-            # Бейдж персонального порта
+            # Бейдж персонального порта с индикацией ручного / последовательного режима
+            is_manual = prof.get("is_manual", False)
+            proxy_num = prof.get("proxy_num", (port - gemini_manager.BASE_SOCKS5_PORT + 1))
+            mode_text = t("badge_manual_proxy") if is_manual else t("badge_default_proxy")
             port_badge = tk.Label(
-                t_line, text=f" SOCKS5 :{port} ", font=FONT_SUB,
-                fg=C["accent_mauve"], bg=C["tag_bg"], padx=6, pady=1
+                t_line, text=f" Proxy {proxy_num} (:{port}) • {mode_text} ", font=FONT_SUB,
+                fg="#11111b" if is_manual else C["accent_mauve"],
+                bg=C["accent_peach"] if is_manual else C["tag_bg"],
+                padx=6, pady=1
             )
             port_badge.pack(side="left", padx=(8, 0))
 
@@ -1192,15 +1487,49 @@ class HerdrConfigApp(tk.Tk):
             else:
                 st_badge = f"⚪ Порт :{port}"
 
+            info_parts = []
+            if email and email not in ("Без email", "Не авторизован", "Нет файла"):
+                if user_name and user_name != email:
+                    info_parts.append(f"Google ID: {email} ({user_name})")
+                else:
+                    info_parts.append(f"Google ID: {email}")
+            else:
+                info_parts.append("Google ID: Не авторизован")
+
+            info_parts.append(f"Токен: {expiry}")
+            info_parts.append(f"Шлюз: {st_badge}")
+
             tk.Label(
                 sub_line,
-                text=f"Имя: {user_name}  •  Профиль: {p_name}  •  Токен: {expiry}  •  Шлюз: {st_badge}",
+                text="  •  ".join(info_parts),
                 font=FONT_MAIN, fg=C["subtext"], bg=C["card"]
             ).pack(side="left")
 
             # Правая колонка: Кнопки
             right = tk.Frame(c_in, bg=C["card"])
             right.pack(side="right")
+
+            # Кнопка ручного выбора SOCKS5 прокси для данного аккаунта
+            proxy_choices = proxy_manager.get_proxy_choices()
+            proxy_menu_btn = tk.Menubutton(
+                right, text=f"🛡️ Proxy {proxy_num} ▾", font=FONT_MAIN,
+                bg=C["card_inner"], fg=C["accent_blue"], activebackground=C["border"],
+                bd=0, padx=8, pady=4, cursor="hand2", relief="flat"
+            )
+            p_menu = tk.Menu(
+                proxy_menu_btn, tearoff=0,
+                bg=C["card_inner"], fg=C["fg"],
+                activebackground=C["accent_blue"], activeforeground="#11111b"
+            )
+            for choice in proxy_choices:
+                c_port = choice["port"]
+                c_label = choice["display"]
+                p_menu.add_command(
+                    label=c_label,
+                    command=lambda name=p_name, pt=c_port: self.on_select_account_proxy(name, pt)
+                )
+            proxy_menu_btn.config(menu=p_menu)
+            proxy_menu_btn.pack(side="left", padx=(0, 6))
 
             if not is_active:
                 btn_sw = tk.Button(
@@ -1219,6 +1548,14 @@ class HerdrConfigApp(tk.Tk):
             )
             btn_test.pack(side="left", padx=(0, 6))
 
+            btn_rename = tk.Button(
+                right, text="✏️", font=FONT_MAIN,
+                bg=C["card_inner"], fg=C["accent_blue"], activebackground=C["border"],
+                bd=0, padx=6, pady=4, cursor="hand2",
+                command=lambda name=p_name: self.on_rename_gemini_profile(name)
+            )
+            btn_rename.pack(side="left", padx=(0, 6 if not is_active and len(self.gemini_profiles) > 1 else 0))
+
             if not is_active and len(self.gemini_profiles) > 1:
                 btn_del = tk.Button(
                     right, text="🗑️", font=FONT_MAIN,
@@ -1228,9 +1565,51 @@ class HerdrConfigApp(tk.Tk):
                 )
                 btn_del.pack(side="left")
 
+    def on_change_gemini_position(self, profile_name: str, new_position: int | None = None):
+        """Смена номера профиля: профиль встаёт на новое место и получает порт своего номера."""
+        total = len(self.gemini_profiles)
+        if new_position is None:
+            curr = next((p.get("position") for p in self.gemini_profiles if p.get("profile_name") == profile_name), 1)
+            new_position = simpledialog.askinteger(
+                t("dlg_gemini_position_title"),
+                t("dlg_gemini_position_prompt", profile=profile_name, total=total),
+                initialvalue=curr, minvalue=1, maxvalue=max(total, 1), parent=self
+            )
+            if not new_position or new_position == curr:
+                return
+        ok, msg = gemini_manager.set_profile_position(profile_name, new_position)
+        if not ok:
+            messagebox.showerror(t("error"), msg)
+            return
+        self.load_gemini_profiles_data()
+        self.render_gemini_page()
+        self.refresh_routes_async()
+
+    def on_rename_gemini_profile(self, profile_name: str):
+        """Переименование аккаунта/профиля."""
+        new_name = simpledialog.askstring(
+            "Переименовать аккаунт",
+            f"Текущее имя профиля: {profile_name}\n\nВведите новое имя профиля:",
+            initialvalue=profile_name,
+            parent=self
+        )
+        if not new_name or new_name.strip() == profile_name:
+            return
+
+        ok, msg = gemini_manager.rename_profile(profile_name, new_name.strip())
+        if ok:
+            self.load_gemini_profiles_data()
+            self.render_gemini_page()
+            self.render_strategy_page()
+            self.refresh_routes_async()
+            messagebox.showinfo("Переименование", msg)
+        else:
+            messagebox.showerror("Ошибка", msg)
+
     def on_switch_gemini_profile(self, profile_name: str):
         """Быстрое переключение активного профиля в 1 клик."""
-        ok, msg = gemini_manager.switch_profile(profile_name)
+        with token_vault_manager.auto_unlock_context():
+            ok, msg = gemini_manager.switch_profile(profile_name)
         if ok:
             self.load_gemini_profiles_data()
             self.render_gemini_page()
@@ -1245,7 +1624,7 @@ class HerdrConfigApp(tk.Tk):
         def worker():
             res = gemini_manager.check_token_live(profile_name)
             def show_res():
-                port = res.get("port", 1081)
+                port = res.get("port", gemini_manager.BASE_SOCKS5_PORT)
                 if res.get("valid"):
                     messagebox.showinfo(
                         "Google OAuth2 Валидация",
@@ -1266,8 +1645,12 @@ class HerdrConfigApp(tk.Tk):
 
     def on_add_google_account(self):
         """Запуск терминала для входа в новый аккаунт Google."""
-        suggested_name = f"account-{len(self.gemini_profiles) + 1}"
-        next_port = 1081 + len(self.gemini_profiles)
+        existing_names = {p.get("profile_name") for p in self.gemini_profiles}
+        idx = 1
+        while f"account-{idx}" in existing_names:
+            idx += 1
+        suggested_name = f"account-{idx}"
+        next_port = gemini_manager._calculate_default_sequential_port(suggested_name)
         p_name = simpledialog.askstring(
             "Новый Google аккаунт",
             f"Будет привязан новый порт: SOCKS5 127.0.0.1:{next_port}\n\nВведите имя профиля:",
@@ -1277,11 +1660,18 @@ class HerdrConfigApp(tk.Tk):
         if not p_name:
             return
 
-        launched = gemini_manager.launch_add_account_terminal(p_name.strip())
+        p_name = p_name.strip()
+        # Пересчитываем порт для фактического имени профиля
+        actual_port = gemini_manager._calculate_default_sequential_port(p_name)
+        # Резервируем порт заранее, чтобы gemini-oauth в WSL использовал именно его
+        gemini_manager.reserve_new_profile_port(p_name, actual_port)
+
+        with token_vault_manager.auto_unlock_context():
+            launched = gemini_manager.launch_add_account_terminal(p_name)
         if launched:
             messagebox.showinfo(
                 "Авторизация в браузере",
-                f"Открыт терминал авторизации для '{p_name}'.\nВыделенный порт: SOCKS5 :{next_port}\n\n"
+                f"Открыт терминал авторизации для '{p_name}'.\nВыделенный порт: SOCKS5 :{actual_port}\n\n"
                 f"1. Перейдите по ссылке в появившемся окне.\n"
                 f"2. Войдите в нужный аккаунт Google в браузере.\n"
                 f"3. После завершения нажмите 'Обновить профили' здесь."
@@ -1292,12 +1682,50 @@ class HerdrConfigApp(tk.Tk):
     def on_delete_gemini_profile(self, profile_name: str):
         """Удаление резервного профиля."""
         if messagebox.askyesno("Удаление профиля", f"Удалить сохраненный профиль '{profile_name}'?"):
-            ok, msg = gemini_manager.delete_profile(profile_name)
+            with token_vault_manager.auto_unlock_context():
+                ok, msg = gemini_manager.delete_profile(profile_name)
             if ok:
                 self.load_gemini_profiles_data()
                 self.render_gemini_page()
             else:
                 messagebox.showerror("Ошибка", msg)
+
+    def on_select_account_proxy(self, profile_name: str, port: int):
+        """Ручной выбор SOCKS5-прокси для конкретного профиля."""
+        ok, msg = gemini_manager.set_profile_manual_port(profile_name, port)
+        if ok:
+            self.load_gemini_profiles_data()
+            self.render_gemini_page()
+            self.refresh_routes_async()
+            try:
+                email = next((p.get("email") for p in self.gemini_profiles if p.get("profile_name") == profile_name), profile_name)
+                curr_proxies = proxy_manager.load_proxies()
+                p_obj = next((p for p in curr_proxies if p.get("port") == port), None)
+                strategy_manager.log_event(
+                    account_email=email,
+                    profile_name=profile_name,
+                    port=port,
+                    ip=p_obj.get("ip", "-") if p_obj else "-",
+                    country=p_obj.get("country", "undefined") if p_obj else "undefined",
+                    event="manual_proxy_select",
+                    note=f"Пользователь вручную назначил SOCKS5 :{port}"
+                )
+            except Exception:
+                pass
+            messagebox.showinfo(t("gemini_title"), msg)
+        else:
+            messagebox.showerror(t("app_name"), msg)
+
+    def on_reset_gemini_proxies_order(self):
+        """Сброс ручных привязок и автоматическая расстановка прокси строго по порядку."""
+        ok, msg = gemini_manager.reset_all_profiles_to_sequential()
+        if ok:
+            self.load_gemini_profiles_data()
+            self.render_gemini_page()
+            self.refresh_routes_async()
+            messagebox.showinfo(t("msg_proxies_reset_title"), msg)
+        else:
+            messagebox.showerror(t("app_name"), msg)
 
     def on_toggle_guard(self):
         """Включение / выключение службы автосмены при лимитах."""
@@ -1333,6 +1761,307 @@ class HerdrConfigApp(tk.Tk):
             self.after(0, self.render_gemini_page)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    # =========================================================================
+    # СТРАНИЦА: CLAUDE OAUTH
+    # =========================================================================
+    def _build_page_claude_oauth(self, parent: tk.Frame):
+        self.claude_profiles = []
+        self.claude_active_status = {}
+
+        c_top = tk.Frame(parent, bg=C["bg"])
+        c_top.pack(fill="x", pady=(0, 10))
+
+        title_frame = tk.Frame(c_top, bg=C["bg"])
+        title_frame.pack(side="left")
+
+        tk.Label(
+            title_frame, text=t("claude_oauth_title"), font=FONT_TITLE,
+            fg=C["accent_peach"], bg=C["bg"]
+        ).pack(anchor="w")
+
+        tk.Label(
+            title_frame, text=t("claude_oauth_desc"),
+            font=FONT_SUB, fg=C["subtext"], bg=C["bg"]
+        ).pack(anchor="w")
+
+        btn_box = tk.Frame(c_top, bg=C["bg"])
+        btn_box.pack(side="right")
+
+        tk.Button(
+            btn_box, text=t("btn_claude_refresh_profiles"), font=FONT_BOLD,
+            bg=C["card_inner"], fg=C["fg"], activebackground=C["border"],
+            bd=0, padx=12, pady=6, cursor="hand2",
+            command=self.refresh_claude_profiles_async
+        ).pack(side="left", padx=(0, 8))
+
+        tk.Button(
+            btn_box, text=t("btn_claude_add_account"), font=FONT_BOLD,
+            bg=C["accent_peach"], fg="#11111b", activebackground="#f5c2e7",
+            bd=0, padx=12, pady=6, cursor="hand2",
+            command=self.on_add_claude_account
+        ).pack(side="left")
+
+        # Карточка прокси (строго Anthropic Claude Proxy со страницы Routes)
+        px_card = tk.Frame(parent, bg=C["card"], bd=1, relief="solid")
+        px_card.configure(highlightbackground=C["border"], highlightthickness=1)
+        px_card.pack(fill="x", pady=(0, 12))
+        px_in = tk.Frame(px_card, bg=C["card"])
+        px_in.pack(fill="both", expand=True, padx=16, pady=10)
+        self.claude_oauth_proxy_lbl = tk.Label(
+            px_in, text="...", font=FONT_BOLD, fg=C["fg"], bg=C["card"], justify="left"
+        )
+        self.claude_oauth_proxy_lbl.pack(anchor="w")
+        tk.Label(
+            px_in, text=t("claude_oauth_proxy_note"),
+            font=FONT_SUB, fg=C["subtext"], bg=C["card"], justify="left"
+        ).pack(anchor="w", pady=(2, 0))
+
+        # Карточка активного аккаунта
+        sp = tk.Frame(parent, bg=C["card"], bd=1, relief="solid")
+        sp.configure(highlightbackground=C["accent_peach"], highlightthickness=1)
+        sp.pack(fill="x", pady=(0, 12))
+        sp_in = tk.Frame(sp, bg=C["card"])
+        sp_in.pack(fill="both", expand=True, padx=16, pady=12)
+
+        sp_head = tk.Frame(sp_in, bg=C["card"])
+        sp_head.pack(fill="x")
+        tk.Label(
+            sp_head, text=t("lbl_active_claude_account"),
+            font=FONT_SUB, fg=C["subtext"], bg=C["card"]
+        ).pack(side="left")
+        self.claude_save_active_btn = tk.Button(
+            sp_head, text=t("btn_claude_save_active"), font=FONT_BOLD,
+            bg=C["card_inner"], fg=C["accent_peach"], activebackground=C["border"],
+            bd=0, padx=10, pady=2, cursor="hand2",
+            command=self.on_save_active_claude_account
+        )
+        self.claude_spotlight_badge = tk.Label(
+            sp_head, text="...", font=FONT_BOLD, bg=C["border"], fg=C["fg"], padx=8, pady=2
+        )
+        self.claude_spotlight_badge.pack(side="right")
+
+        self.claude_spotlight_email_lbl = tk.Label(
+            sp_in, text=t("claude_loading"), font=FONT_APP_TITLE, fg=C["fg"], bg=C["card"]
+        )
+        self.claude_spotlight_email_lbl.pack(anchor="w", pady=(4, 2))
+        self.claude_spotlight_info_lbl = tk.Label(
+            sp_in, text="", font=FONT_MAIN, fg=C["subtext"], bg=C["card"], justify="left"
+        )
+        self.claude_spotlight_info_lbl.pack(anchor="w")
+
+        tk.Label(
+            parent, text=t("lbl_claude_saved_profiles"),
+            font=FONT_BOLD, fg=C["fg"], bg=C["bg"]
+        ).pack(anchor="w", pady=(4, 6))
+
+        self.claude_cards_container = tk.Frame(parent, bg=C["bg"])
+        self.claude_cards_container.pack(fill="both", expand=True)
+
+    def load_claude_profiles_data(self):
+        """Загрузка профилей Claude OAuth из WSL2."""
+        try:
+            self.claude_profiles = claude_oauth_manager.list_profiles()
+            self.claude_active_status = claude_oauth_manager.get_active_status()
+        except Exception as e:
+            self.claude_profiles = []
+            self.claude_active_status = {"exists": False, "email": f"Ошибка: {e}"}
+        try:
+            self.claude_proxy_online = claude_oauth_manager.is_claude_proxy_online(timeout=0.5)
+        except Exception:
+            self.claude_proxy_online = False
+
+    def refresh_claude_profiles_async(self):
+        def worker():
+            self.load_claude_profiles_data()
+            self.after(0, self.render_claude_oauth_page)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def render_claude_oauth_page(self):
+        """Отрисовка вкладки Claude OAuth."""
+        px = claude_oauth_manager.get_claude_oauth_proxy()
+        online = getattr(self, "claude_proxy_online", False)
+        self.claude_oauth_proxy_lbl.config(
+            text=t("claude_oauth_proxy_line", host=px["host"], port=px["port"], http_port=px["http_port"],
+                   status=t("status_online") if online else t("status_offline")),
+            fg=C["green"] if online else C["red"],
+        )
+
+        st = self.claude_active_status or {}
+        if st.get("exists") and st.get("expires_at"):
+            self.claude_spotlight_email_lbl.config(text=f"🟢 {st.get('email')} ({st.get('name')})")
+            self.claude_spotlight_info_lbl.config(
+                text=t("claude_token_line", expiry=st.get("expiry_text"), refresh=st.get("refresh_expiry_text"),
+                       sub=st.get("subscription")),
+                fg=C["yellow"] if st.get("is_expired") else C["green"],
+            )
+            if st.get("saved"):
+                self.claude_spotlight_badge.config(text=f"🟢 {st.get('profile_name')}", bg=C["green"], fg="#11111b")
+                self.claude_save_active_btn.pack_forget()
+            else:
+                self.claude_spotlight_badge.config(text=t("badge_claude_not_saved"), bg=C["yellow"], fg="#11111b")
+                self.claude_save_active_btn.pack(side="right", padx=(0, 8))
+        else:
+            self.claude_spotlight_email_lbl.config(text=t("no_active_claude"))
+            self.claude_spotlight_info_lbl.config(text=t("click_login_claude"), fg=C["subtext"])
+            self.claude_spotlight_badge.config(text="⚪ " + t("not_authorized"), bg=C["border"], fg=C["fg"])
+            self.claude_save_active_btn.pack_forget()
+
+        for widget in self.claude_cards_container.winfo_children():
+            widget.destroy()
+
+        if not self.claude_profiles:
+            empty = tk.Frame(self.claude_cards_container, bg=C["card"], bd=1, relief="solid")
+            empty.configure(highlightbackground=C["border"], highlightthickness=1)
+            empty.pack(fill="x", pady=8)
+            tk.Label(
+                empty, text=t("claude_no_profiles"),
+                font=FONT_MAIN, fg=C["subtext"], bg=C["card"], justify="center", pady=24
+            ).pack(fill="both")
+            return
+
+        for prof in self.claude_profiles:
+            is_active = prof.get("is_active", False)
+            p_name = prof.get("profile_name", "unknown")
+
+            card = tk.Frame(self.claude_cards_container, bg=C["card"], bd=1, relief="solid")
+            card.configure(highlightbackground=C["accent_peach"] if is_active else C["border"], highlightthickness=1)
+            card.pack(fill="x", pady=(0, 8))
+            c_in = tk.Frame(card, bg=C["card"])
+            c_in.pack(fill="both", expand=True, padx=14, pady=10)
+
+            left = tk.Frame(c_in, bg=C["card"])
+            left.pack(side="left", fill="both", expand=True)
+
+            t_line = tk.Frame(left, bg=C["card"])
+            t_line.pack(fill="x")
+            tk.Label(t_line, text=p_name, font=FONT_TITLE, fg=C["fg"], bg=C["card"]).pack(side="left")
+            if is_active:
+                tk.Label(t_line, text=f" {t('btn_active')} ", font=FONT_SUB,
+                         fg="#11111b", bg=C["green"], padx=6, pady=1).pack(side="left", padx=(8, 0))
+            else:
+                tk.Label(t_line, text=f" {t('badge_standby')} ", font=FONT_SUB,
+                         fg=C["subtext"], bg=C["card_inner"], padx=6, pady=1).pack(side="left", padx=(8, 0))
+            tk.Label(t_line, text=f" Claude Proxy (:{prof.get('proxy_port')}) ", font=FONT_SUB,
+                     fg=C["accent_peach"], bg=C["tag_bg"], padx=6, pady=1).pack(side="left", padx=(8, 0))
+            tk.Label(t_line, text=f" {prof.get('subscription', '-')} ", font=FONT_SUB,
+                     fg=C["accent_mauve"], bg=C["tag_bg"], padx=6, pady=1).pack(side="left", padx=(8, 0))
+
+            tk.Label(
+                left, text=f"Claude ID: {prof.get('email')} ({prof.get('name')})",
+                font=FONT_MAIN, fg=C["subtext"], bg=C["card"]
+            ).pack(anchor="w", pady=(3, 0))
+
+            if not prof.get("exists"):
+                token_text = t("claude_login_pending")
+                token_color = C["yellow"]
+            else:
+                token_text = t("claude_token_line", expiry=prof.get("expiry_text"),
+                               refresh=prof.get("refresh_expiry_text"), sub=prof.get("subscription"))
+                token_color = C["red"] if prof.get("is_expired") else C["subtext"]
+            tk.Label(left, text=token_text, font=FONT_MAIN, fg=token_color, bg=C["card"]).pack(anchor="w")
+
+            right = tk.Frame(c_in, bg=C["card"])
+            right.pack(side="right")
+
+            if not is_active and prof.get("exists"):
+                tk.Button(
+                    right, text=t("btn_activate"), font=FONT_BOLD,
+                    bg=C["accent_peach"], fg="#11111b", activebackground="#f5c2e7",
+                    bd=0, padx=10, pady=4, cursor="hand2",
+                    command=lambda name=p_name: self.on_switch_claude_profile(name)
+                ).pack(side="left", padx=(0, 6))
+
+            if prof.get("exists"):
+                tk.Button(
+                    right, text=t("btn_check"), font=FONT_MAIN,
+                    bg=C["card_inner"], fg=C["fg"], activebackground=C["border"],
+                    bd=0, padx=8, pady=4, cursor="hand2",
+                    command=lambda name=p_name: self.on_test_claude_token(name)
+                ).pack(side="left", padx=(0, 6))
+
+            tk.Button(
+                right, text="✏️", font=FONT_MAIN,
+                bg=C["card_inner"], fg=C["accent_blue"], activebackground=C["border"],
+                bd=0, padx=6, pady=4, cursor="hand2",
+                command=lambda name=p_name: self.on_rename_claude_profile(name)
+            ).pack(side="left", padx=(0, 6))
+
+            tk.Button(
+                right, text="🗑️", font=FONT_MAIN,
+                bg=C["card_inner"], fg=C["red"], activebackground=C["border"],
+                bd=0, padx=6, pady=4, cursor="hand2",
+                command=lambda name=p_name: self.on_delete_claude_profile(name)
+            ).pack(side="left")
+
+    def on_add_claude_account(self):
+        """Вход в новый аккаунт Claude через терминал WSL (строго через Claude Proxy)."""
+        px = claude_oauth_manager.get_claude_oauth_proxy()
+        p_name = simpledialog.askstring(
+            t("dlg_claude_new_account"),
+            t("dlg_claude_new_account_prompt", host=px["host"], port=px["port"], http_port=px["http_port"]),
+            initialvalue=claude_oauth_manager.suggest_profile_name(),
+            parent=self
+        )
+        if not p_name:
+            return
+        with token_vault_manager.auto_unlock_context():
+            ok, msg = claude_oauth_manager.launch_login_terminal(p_name.strip())
+        if ok:
+            messagebox.showinfo(t("dlg_claude_new_account"), msg + "\n\n" + t("claude_login_steps"))
+            self.refresh_claude_profiles_async()
+        else:
+            messagebox.showerror(t("error"), msg)
+
+    def on_save_active_claude_account(self):
+        st = self.claude_active_status or {}
+        email = st.get("email") or ""
+        p_name = simpledialog.askstring(
+            t("btn_claude_save_active"), t("dlg_profile_name"),
+            initialvalue=email if claude_oauth_manager.is_valid_profile_name(email) else claude_oauth_manager.suggest_profile_name(),
+            parent=self
+        )
+        if not p_name:
+            return
+        ok, msg = claude_oauth_manager.save_active_as_profile(p_name.strip())
+        (messagebox.showinfo if ok else messagebox.showerror)(t("tab_claude_oauth"), msg)
+        self.refresh_claude_profiles_async()
+
+    def on_switch_claude_profile(self, profile_name: str):
+        with token_vault_manager.auto_unlock_context():
+            ok, msg = claude_oauth_manager.switch_profile(profile_name)
+        (messagebox.showinfo if ok else messagebox.showerror)(t("tab_claude_oauth"), msg)
+        self.refresh_claude_profiles_async()
+
+    def on_test_claude_token(self, profile_name: str):
+        def worker():
+            res = claude_oauth_manager.validate_profile_token(profile_name)
+
+            def show():
+                if res.get("success"):
+                    messagebox.showinfo(t("tab_claude_oauth"), t("claude_token_valid", email=res.get("email"), port=res.get("port")))
+                else:
+                    messagebox.showerror(t("tab_claude_oauth"), str(res.get("error")))
+            self.after(0, show)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_rename_claude_profile(self, profile_name: str):
+        new_name = simpledialog.askstring(t("tab_claude_oauth"), t("dlg_profile_name"), initialvalue=profile_name, parent=self)
+        if not new_name or new_name.strip() == profile_name:
+            return
+        ok, msg = claude_oauth_manager.rename_profile(profile_name, new_name.strip())
+        (messagebox.showinfo if ok else messagebox.showerror)(t("tab_claude_oauth"), msg)
+        self.refresh_claude_profiles_async()
+
+    def on_delete_claude_profile(self, profile_name: str):
+        if not messagebox.askyesno(t("tab_claude_oauth"), t("dlg_claude_delete", profile=profile_name)):
+            return
+        with token_vault_manager.auto_unlock_context():
+                ok, msg = claude_oauth_manager.delete_profile(profile_name)
+        (messagebox.showinfo if ok else messagebox.showerror)(t("tab_claude_oauth"), msg)
+        self.refresh_claude_profiles_async()
 
     # =========================================================================
     # СТРАНИЦА 4: STRATEGY & АНАЛИТИКА ПРОКСИ
@@ -1412,12 +2141,12 @@ class HerdrConfigApp(tk.Tk):
         for prof in profiles:
             p_name = prof.get("profile_name", "account")
             email = prof.get("email", "Без email")
-            curr_port = prof.get("port", 1081)
+            curr_port = prof.get("port", gemini_manager.BASE_SOCKS5_PORT)
             curr_ip = prof.get("proxy_ip", "-")
             curr_co = prof.get("proxy_country", "undefined")
             is_active = prof.get("is_active", False)
 
-            eval_res = strategy_manager.evaluate_account_strategy(email, curr_co, tendencies)
+            eval_res = strategy_manager.evaluate_account_strategy(email, curr_co, tendencies, profile_name=p_name)
             st = eval_res.get("status", "neutral")
 
             card = tk.Frame(self.strat_cards_container, bg=C["card"], bd=1, relief="solid")
@@ -1432,15 +2161,11 @@ class HerdrConfigApp(tk.Tk):
             t_row.pack(fill="x")
 
             act_icon = "🟢" if is_active else "⚪"
+            strat_title = f"{act_icon} {p_name}"
             tk.Label(
-                t_row, text=f"{act_icon} {email}", font=FONT_TITLE,
+                t_row, text=strat_title, font=FONT_TITLE,
                 fg=C["fg"], bg=C["card"]
             ).pack(side="left")
-
-            tk.Label(
-                t_row, text=f" {p_name} ", font=FONT_SUB,
-                fg=C["subtext"], bg=C["card_inner"], padx=6, pady=1
-            ).pack(side="left", padx=(8, 0))
 
             tk.Label(
                 t_row, text=f" SOCKS5 :{curr_port} ", font=FONT_SUB,
@@ -1470,20 +2195,21 @@ class HerdrConfigApp(tk.Tk):
             d_row = tk.Frame(c_in, bg=C["card"])
             d_row.pack(fill="x", pady=(8, 4))
 
+            google_prefix = f"Google: {email}  •  " if email and email not in ("Без email", "Не авторизован", "") else ""
             tk.Label(
                 d_row,
-                text=f"Текущий туннель: 127.0.0.1:{curr_port}  ➔  {curr_ip} ({curr_co})",
+                text=f"{google_prefix}Текущий туннель: 127.0.0.1:{curr_port}  ➔  {curr_ip} ({curr_co})",
                 font=FONT_MAIN, fg=C["fg"], bg=C["card"]
             ).pack(side="left")
 
             dom_c = eval_res.get("dominant_country", "undefined")
             dom_p = eval_res.get("dominant_percent", 0)
-            tot = eval_res.get("total_launches", 0)
-            tot_str = f" ({tot} сессий)" if tot else ""
+            dom_dur = eval_res.get("dominant_duration_fmt", "")
+            dur_str = f" • {dom_dur}" if dom_dur and dom_dur != "0 сек" else ""
 
             tk.Label(
                 d_row,
-                text=f"Привычный регион: {dom_c} ({dom_p}% активности{tot_str})",
+                text=f"Привычный регион: {dom_c} ({dom_p}% времени{dur_str})",
                 font=FONT_BOLD, fg=C["accent_blue"], bg=C["card"]
             ).pack(side="right")
 
@@ -1529,9 +2255,9 @@ class HerdrConfigApp(tk.Tk):
 
     def show_extended_log_dialog(self):
         dlg = tk.Toplevel(self)
-        dlg.title("Расширенный журнал запусков и статистика по IP")
-        dlg.geometry("860x560")
-        dlg.minsize(780, 480)
+        dlg.title("Расширенный журнал сессий, времени соединений и статистика IP")
+        dlg.geometry("960x580")
+        dlg.minsize(860, 480)
         dlg.configure(bg=C["bg"])
 
         style = ttk.Style()
@@ -1544,15 +2270,16 @@ class HerdrConfigApp(tk.Tk):
         nb.pack(fill="both", expand=True, padx=12, pady=12)
 
         tab_history = tk.Frame(nb, bg=C["bg"])
-        nb.add(tab_history, text="📜 Журнал всех событий (Логи)")
+        nb.add(tab_history, text="📜 Журнал сессий и времени соединений")
 
         tab_ips = tk.Frame(nb, bg=C["bg"])
-        nb.add(tab_ips, text="🌐 Сводка по уникальным IP")
+        nb.add(tab_ips, text="🌐 Сводка по уникальным IP и длительности")
 
-        # Вкладка 1
-        cols1 = ("time", "account", "port", "ip", "country", "event", "note")
+        # Вкладка 1: История с длительностью соединений
+        cols1 = ("time", "duration", "account", "port", "ip", "country", "event", "note")
         tree1 = ttk.Treeview(tab_history, columns=cols1, show="headings", height=18)
-        tree1.heading("time", text="Время")
+        tree1.heading("time", text="Время начала")
+        tree1.heading("duration", text="Длительность")
         tree1.heading("account", text="Аккаунт Google")
         tree1.heading("port", text="Порт")
         tree1.heading("ip", text="Внешний IP")
@@ -1560,13 +2287,14 @@ class HerdrConfigApp(tk.Tk):
         tree1.heading("event", text="Событие")
         tree1.heading("note", text="Примечание")
 
-        tree1.column("time", width=140, anchor="w")
+        tree1.column("time", width=135, anchor="w")
+        tree1.column("duration", width=95, anchor="center")
         tree1.column("account", width=170, anchor="w")
-        tree1.column("port", width=65, anchor="center")
-        tree1.column("ip", width=120, anchor="w")
-        tree1.column("country", width=100, anchor="w")
-        tree1.column("event", width=90, anchor="center")
-        tree1.column("note", width=130, anchor="w")
+        tree1.column("port", width=60, anchor="center")
+        tree1.column("ip", width=115, anchor="w")
+        tree1.column("country", width=95, anchor="w")
+        tree1.column("event", width=85, anchor="center")
+        tree1.column("note", width=140, anchor="w")
 
         sc1 = ttk.Scrollbar(tab_history, orient="vertical", command=tree1.yview)
         tree1.configure(yscrollcommand=sc1.set)
@@ -1578,7 +2306,8 @@ class HerdrConfigApp(tk.Tk):
             tree1.insert(
                 "", "end",
                 values=(
-                    e.get("timestamp", "-"),
+                    e.get("start_time") or e.get("timestamp", "-"),
+                    e.get("duration_fmt", "-"),
                     e.get("account_email", "-"),
                     e.get("port", "-"),
                     e.get("ip", "-"),
@@ -1588,22 +2317,24 @@ class HerdrConfigApp(tk.Tk):
                 )
             )
 
-        # Вкладка 2
-        cols2 = ("ip", "country", "launches", "ports", "accounts", "last_seen")
+        # Вкладка 2: Сводка по IP с суммарным временем
+        cols2 = ("ip", "country", "duration", "launches", "ports", "accounts", "last_seen")
         tree2 = ttk.Treeview(tab_ips, columns=cols2, show="headings", height=18)
         tree2.heading("ip", text="Внешний IP")
         tree2.heading("country", text="Страна")
-        tree2.heading("launches", text="Всего запусков")
+        tree2.heading("duration", text="Общее время")
+        tree2.heading("launches", text="Сессий")
         tree2.heading("ports", text="Порты")
         tree2.heading("accounts", text="Аккаунты")
-        tree2.heading("last_seen", text="Последний запуск")
+        tree2.heading("last_seen", text="Последняя активность")
 
-        tree2.column("ip", width=130, anchor="w")
-        tree2.column("country", width=120, anchor="w")
-        tree2.column("launches", width=95, anchor="center")
-        tree2.column("ports", width=100, anchor="w")
-        tree2.column("accounts", width=180, anchor="w")
-        tree2.column("last_seen", width=140, anchor="w")
+        tree2.column("ip", width=125, anchor="w")
+        tree2.column("country", width=110, anchor="w")
+        tree2.column("duration", width=105, anchor="center")
+        tree2.column("launches", width=65, anchor="center")
+        tree2.column("ports", width=80, anchor="w")
+        tree2.column("accounts", width=160, anchor="w")
+        tree2.column("last_seen", width=135, anchor="w")
 
         sc2 = ttk.Scrollbar(tab_ips, orient="vertical", command=tree2.yview)
         tree2.configure(yscrollcommand=sc2.set)
@@ -1619,6 +2350,7 @@ class HerdrConfigApp(tk.Tk):
                 values=(
                     s.get("ip", "-"),
                     s.get("country", "-"),
+                    s.get("total_duration_fmt", "-"),
                     s.get("total_launches", 0),
                     ports_str,
                     accs_str,
@@ -1702,6 +2434,37 @@ class HerdrConfigApp(tk.Tk):
             text="Пароль хранится в .env и используется для шифрования архивов AES-256-GCM. Без введенного пароля бэкап невозможно создать или расшифровать.",
             font=FONT_SUB, fg=C["subtext"], bg=C["card"]
         ).pack(anchor="w", pady=(4, 0))
+
+        # ── 1.b. Хранилище токенов ─────────────────────────────
+        vault_card = tk.Frame(parent, bg=C["card"], bd=1, relief="solid")
+        vault_card.configure(highlightbackground=C["border"], highlightthickness=1)
+        vault_card.pack(fill="x", pady=(0, 10))
+
+        v_in = tk.Frame(vault_card, bg=C["card"])
+        v_in.pack(fill="both", expand=True, padx=14, pady=10)
+
+        # Статус
+        is_locked = token_vault_manager.is_vault_locked()
+        v_status = t("vault_locked_status") if is_locked else t("vault_unlocked_status")
+        v_color = C["accent_peach"] if is_locked else C["accent_blue"]
+        
+        self.vault_lbl = tk.Label(v_in, text=f"{t('vault_title')}: {v_status}", font=FONT_BOLD, fg=v_color, bg=C["card"])
+        self.vault_lbl.pack(side="left")
+
+        # Кнопки
+        tk.Button(
+            v_in, text=t("btn_lock_vault"), font=FONT_MAIN,
+            bg=C["card_inner"], fg=C["accent_peach"], activebackground=C["border"],
+            bd=0, padx=10, pady=4, cursor="hand2",
+            command=self.on_vault_lock
+        ).pack(side="right", padx=(10, 0))
+
+        tk.Button(
+            v_in, text=t("btn_unlock_vault"), font=FONT_MAIN,
+            bg=C["card_inner"], fg=C["accent_blue"], activebackground=C["border"],
+            bd=0, padx=10, pady=4, cursor="hand2",
+            command=self.on_vault_unlock
+        ).pack(side="right")
 
         # ── 2. Панель параметров хранения и расписания ─────────
         cfg_card = tk.Frame(parent, bg=C["card"], bd=1, relief="solid")
@@ -1797,7 +2560,7 @@ class HerdrConfigApp(tk.Tk):
         self.backup_list_container = tk.Frame(tbl_card, bg=C["card"])
         self.backup_list_container.pack(fill="both", expand=True, padx=4, pady=4)
 
-        # ── 5. Опасная зона: Полный сброс всех данных ───────────
+    # ── 5. Опасная зона: Полный сброс всех данных ───────────
         danger_card = tk.Frame(parent, bg=C["card"], bd=1, relief="solid")
         danger_card.configure(highlightbackground=C["red"], highlightthickness=1)
         danger_card.pack(fill="x", pady=(10, 0))
@@ -1827,6 +2590,32 @@ class HerdrConfigApp(tk.Tk):
         )
         self.btn_wipe_data.pack(side="right")
 
+    def on_vault_lock(self):
+        pw = self.backup_password_var.get()
+        if not pw:
+            messagebox.showwarning(t("error"), t("err_pw_lock"))
+            return
+            
+        success, msg = token_vault_manager.lock_tokens(pw)
+        if success:
+            messagebox.showinfo(t("success"), t("vault_lock_success"))
+            self.render_backup_page()
+        else:
+            messagebox.showerror(t("error"), t("vault_lock_error"))
+
+    def on_vault_unlock(self):
+        pw = self.backup_password_var.get()
+        if not pw:
+            messagebox.showwarning(t("error"), t("err_pw_unlock"))
+            return
+            
+        success, msg = token_vault_manager.unlock_tokens(pw)
+        if success:
+            messagebox.showinfo(t("success"), t("vault_unlock_success"))
+            self.render_backup_page()
+        else:
+            messagebox.showerror(t("error"), t("vault_unlock_error"))
+
     def on_wipe_all_data(self):
         """Полная очистка всех данных программы с подтверждением."""
         if not messagebox.askyesno(t("msg_wipe_confirm_1_title"),
@@ -1847,12 +2636,21 @@ class HerdrConfigApp(tk.Tk):
             return
 
         ok, msg = backup_manager.wipe_all_data()
+        
+        # Полный сброс кеша памяти GUI, чтобы удаленные стратегии и профили не всплыли после обновления
+        self.integrations_data = []
+        if hasattr(self, "claude_profile"): 
+            self.claude_profile = None
+            
         self.backup_password_var.set("")
+        
+        # Полностью перезагружаем стейт 
+        self.load_data() 
         self.load_proxies_data()
         self.load_gemini_profiles_data()
-        self.render_backup_page()
-        self.render_proxy_table()
-        self.refresh_routes_async()
+        
+        # Обновляем все UI
+        self.update_content()
 
         if ok:
             messagebox.showinfo("Очистка завершена", f"✓ {msg}")
@@ -1983,9 +2781,14 @@ class HerdrConfigApp(tk.Tk):
             def done():
                 self.btn_import_backup.config(state="normal", text="📥 Восстановить из файла (Импорт)")
                 if ok:
+                    self.load_backup_config_data()
                     self.load_proxies_data()
                     self.load_gemini_profiles_data()
                     self.render_backup_page()
+                    if hasattr(self, "_load_initial_console_logs"):
+                        self._load_initial_console_logs()
+                    if hasattr(self, "on_integrations_status_click"):
+                        self.on_integrations_status_click()
                     self.refresh_routes_async()
                     messagebox.showinfo("Импорт бэкапа", msg)
                 else:
@@ -1993,6 +2796,18 @@ class HerdrConfigApp(tk.Tk):
             self.after(0, done)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def load_backup_config_data(self):
+        """Перезагружает параметры бэкапа из settings.json в переменные UI."""
+        b_cfg = backup_manager.get_backup_config()
+        self._suppress_backup_trace = True
+        try:
+            self.backup_dir_var.set(b_cfg.get("backup_dir", str(backup_manager.DEFAULT_BACKUP_DIR)))
+            self.backup_interval_var.set(b_cfg.get("backup_interval_hours", 12))
+            self.auto_backup_enabled_var.set(b_cfg.get("auto_backup_enabled", False))
+            self.backup_password_var.set(backup_manager.load_backup_password())
+        finally:
+            self._suppress_backup_trace = False
 
     def on_restore_specific_backup(self, filepath: str):
         pw = self.backup_password_var.get().strip()
@@ -2011,9 +2826,14 @@ class HerdrConfigApp(tk.Tk):
             ok, msg, _ = backup_manager.restore_encrypted_backup(filepath, pw)
             def done():
                 if ok:
+                    self.load_backup_config_data()
                     self.load_proxies_data()
                     self.load_gemini_profiles_data()
                     self.render_backup_page()
+                    if hasattr(self, "_load_initial_console_logs"):
+                        self._load_initial_console_logs()
+                    if hasattr(self, "on_integrations_status_click"):
+                        self.on_integrations_status_click()
                     self.refresh_routes_async()
                     messagebox.showinfo("Импорт бэкапа", msg)
                 else:
@@ -2023,10 +2843,548 @@ class HerdrConfigApp(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     # =========================================================================
+    # СТРАНИЦА: ИНТЕГРАЦИИ (AionUi, OmniRoute, Claude Code, Gemini Farm)
+    # =========================================================================
+    def _build_page_integrations(self, parent: tk.Frame):
+        """Построение вкладки Интеграции."""
+        p_top = tk.Frame(parent, bg=C["bg"])
+        p_top.pack(fill="x", pady=(0, 10))
+
+        tk.Label(
+            p_top, text=t("integrations_title"), font=FONT_TITLE,
+            fg=C["accent_blue"], bg=C["bg"]
+        ).pack(anchor="w")
+
+        tk.Label(
+            p_top, text=t("integrations_subtitle"), font=FONT_SUB,
+            fg=C["subtext"], bg=C["bg"]
+        ).pack(anchor="w")
+
+        # ── Карточка 1: Окно AionUi & Быстрый статус ────────────────────────
+        card_aion = tk.Frame(parent, bg=C["card"], bd=1, relief="solid")
+        card_aion.configure(highlightbackground=C["border"], highlightthickness=1)
+        card_aion.pack(fill="x", pady=(0, 10))
+
+        pad_aion = tk.Frame(card_aion, bg=C["card"])
+        pad_aion.pack(fill="both", expand=True, padx=16, pady=12)
+
+        # Заголовок карточки
+        head_box = tk.Frame(pad_aion, bg=C["card"])
+        head_box.pack(fill="x", pady=(0, 6))
+
+        tk.Label(
+            head_box, text=t("card_aionui_title"), font=FONT_BOLD,
+            fg=C["fg"], bg=C["card"]
+        ).pack(side="left")
+
+        self.lbl_integ_overall = tk.Label(
+            head_box, text="READY", font=FONT_SUB,
+            fg="#11111b", bg=C["green"], padx=6, pady=1
+        )
+        self.lbl_integ_overall.pack(side="right")
+
+        tk.Label(
+            pad_aion, text=t("card_aionui_desc"), font=FONT_SUB,
+            fg=C["subtext"], bg=C["card"]
+        ).pack(anchor="w", pady=(0, 10))
+
+        # Блок статусов компонентов (4 плашки в одну линию)
+        st_frame = tk.Frame(pad_aion, bg=C["card"])
+        st_frame.pack(fill="x", pady=(0, 12))
+
+        # 1. AionUi :25808
+        self.badge_aionui = tk.Label(
+            st_frame, text="AionUi (:25808): ● ...", font=FONT_SUB,
+            bg=C["card_inner"], fg=C["subtext"], padx=8, pady=4, bd=1, relief="solid"
+        )
+        self.badge_aionui.configure(highlightbackground=C["border"], highlightthickness=1)
+        self.badge_aionui.pack(side="left", padx=(0, 6), expand=True, fill="x")
+
+        # 2. OmniRoute :20128
+        self.badge_omniroute = tk.Label(
+            st_frame, text="OmniRoute (:20128): ● ...", font=FONT_SUB,
+            bg=C["card_inner"], fg=C["subtext"], padx=8, pady=4, bd=1, relief="solid"
+        )
+        self.badge_omniroute.configure(highlightbackground=C["border"], highlightthickness=1)
+        self.badge_omniroute.pack(side="left", padx=6, expand=True, fill="x")
+
+        # 3. Claude Code :1015
+        self.badge_claude = tk.Label(
+            st_frame, text="Claude (:1015): ● ...", font=FONT_SUB,
+            bg=C["card_inner"], fg=C["subtext"], padx=8, pady=4, bd=1, relief="solid"
+        )
+        self.badge_claude.configure(highlightbackground=C["border"], highlightthickness=1)
+        self.badge_claude.pack(side="left", padx=6, expand=True, fill="x")
+
+        # 4. Gemini Farm :1081+
+        self.badge_gemini = tk.Label(
+            st_frame, text="Gemini Farm: ● ...", font=FONT_SUB,
+            bg=C["card_inner"], fg=C["subtext"], padx=8, pady=4, bd=1, relief="solid"
+        )
+        self.badge_gemini.configure(highlightbackground=C["border"], highlightthickness=1)
+        self.badge_gemini.pack(side="left", padx=(6, 0), expand=True, fill="x")
+
+        # Панель кнопок действий
+        btn_bar = tk.Frame(pad_aion, bg=C["card"])
+        btn_bar.pack(fill="x")
+
+        self.btn_integ_status = tk.Button(
+            btn_bar, text=t("btn_aionui_status"), font=FONT_BOLD,
+            bg=C["accent_blue"], fg="#11111b", activebackground="#b4befe",
+            bd=0, padx=12, pady=6, cursor="hand2",
+            command=self.on_integrations_status_click
+        )
+        self.btn_integ_status.pack(side="left", padx=(0, 6))
+
+        self.btn_integ_sync_claude = tk.Button(
+            btn_bar, text=t("btn_sync_claude"), font=FONT_BOLD,
+            bg=C["card_inner"], fg=C["accent_peach"], activebackground=C["border"],
+            bd=0, padx=12, pady=6, cursor="hand2",
+            command=self.on_integrations_sync_claude_click
+        )
+        self.btn_integ_sync_claude.pack(side="left", padx=6)
+
+        self.btn_integ_sync_gemini = tk.Button(
+            btn_bar, text=t("btn_sync_gemini"), font=FONT_BOLD,
+            bg=C["card_inner"], fg=C["accent_mauve"], activebackground=C["border"],
+            bd=0, padx=12, pady=6, cursor="hand2",
+            command=self.on_integrations_sync_gemini_click
+        )
+        self.btn_integ_sync_gemini.pack(side="left", padx=6)
+
+        self.btn_integ_history = tk.Button(
+            btn_bar, text=t("btn_view_logs"), font=FONT_BOLD,
+            bg=C["card_inner"], fg=C["fg"], activebackground=C["border"],
+            bd=0, padx=12, pady=6, cursor="hand2",
+            command=self.show_log_history_dialog
+        )
+        self.btn_integ_history.pack(side="right", padx=(6, 0))
+
+        self.btn_ext_history = tk.Button(
+            btn_bar, text=t("ext_logs_btn"), font=FONT_BOLD,
+            bg=C["card_inner"], fg=C["accent_peach"], activebackground=C["border"],
+            bd=0, padx=12, pady=6, cursor="hand2",
+            command=self.show_extended_logs_dialog
+        )
+        self.btn_ext_history.pack(side="right", padx=(6, 6))
+
+        self.btn_integ_clear_console = tk.Button(
+            btn_bar, text=t("btn_clear_console"), font=FONT_MAIN,
+            bg=C["card_inner"], fg=C["subtext"], activebackground=C["border"],
+            bd=0, padx=10, pady=6, cursor="hand2",
+            command=self.clear_integrations_console
+        )
+        self.btn_integ_clear_console.pack(side="right", padx=6)
+
+        # ── Карточка 2: Консоль хода выполнения (Логи) ──────────────────────
+        con_card = tk.Frame(parent, bg=C["card"], bd=1, relief="solid")
+        con_card.configure(highlightbackground=C["border"], highlightthickness=1)
+        con_card.pack(fill="both", expand=True)
+
+        con_pad = tk.Frame(con_card, bg=C["card"])
+        con_pad.pack(fill="both", expand=True, padx=16, pady=12)
+
+        con_head = tk.Frame(con_pad, bg=C["card"])
+        con_head.pack(fill="x", pady=(0, 8))
+
+        tk.Label(
+            con_head, text=t("lbl_console_title"), font=FONT_BOLD,
+            fg=C["fg"], bg=C["card"]
+        ).pack(side="left")
+
+        self.lbl_log_stats = tk.Label(
+            con_head,
+            text=t("lbl_log_stats", file="integrations.log", size=integrations_manager.logger.get_file_size_str()),
+            font=FONT_SUB, fg=C["subtext"], bg=C["card"]
+        )
+        self.lbl_log_stats.pack(side="right")
+
+        # Окно консоли с прокруткой
+        con_wrap = tk.Frame(con_pad, bg="#11111b", bd=1, relief="solid")
+        con_wrap.configure(highlightbackground=C["border"], highlightthickness=1)
+        con_wrap.pack(fill="both", expand=True)
+
+        self.integ_console = tk.Text(
+            con_wrap, bg="#11111b", fg=C["fg"], insertbackground=C["fg"],
+            selectbackground=C["border"], font=FONT_MONO, wrap="word",
+            relief="flat", bd=0, padx=10, pady=10, state="disabled"
+        )
+        sc_con = ttk.Scrollbar(con_wrap, orient="vertical", command=self.integ_console.yview)
+        self.integ_console.configure(yscrollcommand=sc_con.set)
+
+        self.integ_console.pack(side="left", fill="both", expand=True)
+        sc_con.pack(side="right", fill="y")
+
+        # Теги для подсветки синтаксиса логов
+        self.integ_console.tag_config("TIMESTAMP", foreground="#6c7086")
+        self.integ_console.tag_config("INFO", foreground="#cdd6f4")
+        self.integ_console.tag_config("SUCCESS", foreground=C["green"])
+        self.integ_console.tag_config("WARN", foreground=C["yellow"])
+        self.integ_console.tag_config("ERROR", foreground=C["red"])
+        self.integ_console.tag_config("STEP", foreground=C["accent_blue"], font=FONT_MONO_BOLD)
+        self.integ_console.tag_config("SYSTEM", foreground=C["accent_mauve"])
+
+        self._load_initial_console_logs()
+
+    def _load_initial_console_logs(self):
+        """Загрузка недавних логов при старте интерфейса."""
+        if not hasattr(self, "integ_console") or not self.integ_console.winfo_exists():
+            return
+        hist = integrations_manager.logger.read_history()
+        lines = hist.strip().splitlines()
+        last_lines = lines[-40:] if len(lines) > 40 else lines
+        self.integ_console.config(state="normal")
+        self.integ_console.delete("1.0", "end")
+        for line in last_lines:
+            lvl = "INFO"
+            if "[SUCCESS]" in line:
+                lvl = "SUCCESS"
+            elif "[WARN]" in line:
+                lvl = "WARN"
+            elif "[ERROR]" in line:
+                lvl = "ERROR"
+            elif "[STEP]" in line:
+                lvl = "STEP"
+            elif "[SYSTEM]" in line:
+                lvl = "SYSTEM"
+            self.integ_console.insert("end", line + "\n", lvl)
+        self.integ_console.see("end")
+        self.integ_console.config(state="disabled")
+        self._update_log_stats_label()
+
+    def _on_integration_log(self, ts: str, level: str, message: str):
+        """Слушатель логов для динамического добавления в консоль."""
+        def _ui_update():
+            if not hasattr(self, "integ_console") or not self.integ_console.winfo_exists():
+                return
+            self.integ_console.config(state="normal")
+            self.integ_console.insert("end", f"[{ts}] ", "TIMESTAMP")
+            self.integ_console.insert("end", f"[{level}] ", level)
+            self.integ_console.insert("end", f"{message}\n", level)
+            self.integ_console.see("end")
+            self.integ_console.config(state="disabled")
+            self._update_log_stats_label()
+        self.after(0, _ui_update)
+
+    def _update_log_stats_label(self):
+        """Обновление плашки размера файла логов."""
+        if hasattr(self, "lbl_log_stats") and self.lbl_log_stats.winfo_exists():
+            sz = integrations_manager.logger.get_file_size_str()
+            self.lbl_log_stats.config(text=t("lbl_log_stats", file="integrations.log", size=sz))
+
+    def clear_integrations_console(self):
+        """Очищает экранную консоль GUI."""
+        if hasattr(self, "integ_console") and self.integ_console.winfo_exists():
+            self.integ_console.config(state="normal")
+            self.integ_console.delete("1.0", "end")
+            self.integ_console.config(state="disabled")
+            integrations_manager.logger.log("Экранная консоль очищена (полный журнал сохранен в integrations.log)", "SYSTEM")
+
+    def render_integrations_page(self):
+        """Обновление страницы интеграций при переключении на неё."""
+        self._update_log_stats_label()
+        if not getattr(self, "_has_checked_integ_once", False):
+            self._has_checked_integ_once = True
+            self.on_integrations_status_click()
+
+    def on_integrations_status_click(self):
+        """Запуск комплексной проверки статуса AionUi, OmniRoute, Claude и Gemini."""
+        if getattr(self, "_integ_task_running", False):
+            return
+        self._integ_task_running = True
+        self.btn_integ_status.config(state="disabled", text="⏳ Проверка...")
+        self.lbl_integ_overall.config(text="CHECKING...", bg=C["yellow"], fg="#11111b")
+
+        def worker():
+            try:
+                res = integrations_manager.check_aionui_status()
+            except Exception as e:
+                integrations_manager.logger.log(f"Ошибка проверки статуса: {e}", "ERROR")
+                res = {}
+            def done():
+                self._integ_task_running = False
+                self.btn_integ_status.config(state="normal", text=t("btn_aionui_status"))
+                self._apply_integrations_status(res)
+            try:
+                if not getattr(self, "_closing", False):
+                    self.after(0, done)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_integrations_status(self, res: dict):
+        """Обновление плашек статуса на основе диагностики."""
+        if not hasattr(self, "badge_aionui") or not self.badge_aionui.winfo_exists():
+            return
+        # 1. AionUi
+        aion = res.get("aionui", {})
+        if aion.get("online"):
+            self.badge_aionui.config(text="AionUi (:25808): ● ONLINE", fg=C["green"])
+        else:
+            self.badge_aionui.config(text="AionUi (:25808): ● OFFLINE", fg=C["red"])
+
+        # 2. OmniRoute
+        omni = res.get("omniroute", {})
+        if omni.get("online"):
+            self.badge_omniroute.config(text="OmniRoute (:20128): ● ONLINE", fg=C["green"])
+        else:
+            self.badge_omniroute.config(text="OmniRoute (:20128): ● OFFLINE", fg=C["red"])
+
+        # 3. Claude
+        claude = res.get("claude", {})
+        c_socks = claude.get("socks5_1015", False)
+        c_auth = claude.get("oauth", {}).get("authorized", False)
+        if c_socks and c_auth:
+            sub = claude.get("oauth", {}).get("subscription_type", "Pro").upper()
+            self.badge_claude.config(text=f"Claude (:1015): ● {sub} OK", fg=C["green"])
+        elif c_socks:
+            self.badge_claude.config(text="Claude (:1015): ● NO AUTH", fg=C["yellow"])
+        else:
+            self.badge_claude.config(text="Claude (:1015): ● OFFLINE", fg=C["red"])
+
+        # 4. Gemini
+        gemini = res.get("gemini", {})
+        act_ports = gemini.get("active_ports", [])
+        tot_prof = gemini.get("total_profiles", 0)
+        if act_ports:
+            self.badge_gemini.config(text=f"Gemini Farm: ● {len(act_ports)}/{tot_prof} Online", fg=C["green"])
+        elif tot_prof > 0:
+            self.badge_gemini.config(text=f"Gemini Farm: ● 0/{tot_prof} Offline", fg=C["yellow"])
+        else:
+            self.badge_gemini.config(text="Gemini Farm: ● 0 Profiles", fg=C["subtext"])
+
+        # Overall badge
+        all_ok = aion.get("online") and omni.get("online") and c_socks and bool(act_ports)
+        if all_ok:
+            self.lbl_integ_overall.config(text="ACTIVE", bg=C["green"], fg="#11111b")
+        else:
+            self.lbl_integ_overall.config(text="PARTIAL", bg=C["yellow"], fg="#11111b")
+
+    def on_integrations_sync_claude_click(self):
+        """Синхронизация Claude Code."""
+        if getattr(self, "_integ_task_running", False):
+            return
+        self._integ_task_running = True
+        self.btn_integ_sync_claude.config(state="disabled", text="⏳ Синхронизация...")
+        self.lbl_integ_overall.config(text="SYNCING CLAUDE...", bg=C["accent_peach"], fg="#11111b")
+
+        def worker():
+            try:
+                res = integrations_manager.sync_claude()
+            except Exception as e:
+                integrations_manager.logger.log(f"Критическая ошибка синхронизации Claude: {e}", "ERROR")
+                res = {"success": False, "error": str(e)}
+
+            def done():
+                self._integ_task_running = False
+                self.btn_integ_sync_claude.config(state="normal", text=t("btn_sync_claude"))
+                self.on_integrations_status_click()
+            try:
+                if not getattr(self, "_closing", False):
+                    self.after(0, done)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_integrations_sync_gemini_click(self):
+        """Синхронизация Gemini Farm."""
+        if getattr(self, "_integ_task_running", False):
+            return
+        self._integ_task_running = True
+        self.btn_integ_sync_gemini.config(state="disabled", text="⏳ Синхронизация...")
+        self.lbl_integ_overall.config(text="SYNCING GEMINI...", bg=C["accent_mauve"], fg="#11111b")
+
+        def worker():
+            try:
+                res = integrations_manager.sync_gemini()
+            except Exception as e:
+                integrations_manager.logger.log(f"Критическая ошибка синхронизации Gemini: {e}", "ERROR")
+                res = {"success": False, "error": str(e)}
+
+            def done():
+                self._integ_task_running = False
+                self.btn_integ_sync_gemini.config(state="normal", text=t("btn_sync_gemini"))
+                self.on_integrations_status_click()
+            try:
+                if not getattr(self, "_closing", False):
+                    self.after(0, done)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def show_extended_logs_dialog(self):
+        """Окно просмотра расширенной истории логов (extended.log)."""
+        dlg = tk.Toplevel(self)
+        dlg.title(t("ext_logs_title"))
+        dlg.geometry("900x600")
+        dlg.minsize(800, 500)
+        dlg.configure(bg=C["bg"])
+
+        top_f = tk.Frame(dlg, bg=C["bg"])
+        top_f.pack(fill="x", padx=16, pady=(14, 8))
+
+        tk.Label(
+            top_f, text=t("ext_logs_btn"), font=FONT_TITLE,
+            fg=C["accent_peach"], bg=C["bg"]
+        ).pack(side="left")
+
+        import extended_logger
+        size_bytes = 0
+        if extended_logger.EXTENDED_LOG_FILE.exists():
+            size_bytes = extended_logger.EXTENDED_LOG_FILE.stat().st_size
+        size_str = f"{size_bytes / 1024:.1f} KB"
+
+        dlg_stats_lbl = tk.Label(
+            top_f, text=t("ext_logs_file", size=size_str),
+            font=FONT_SUB, fg=C["subtext"], bg=C["bg"]
+        )
+        dlg_stats_lbl.pack(side="right")
+
+        card_wrap = tk.Frame(dlg, bg=C["card"], bd=1, relief="solid")
+        card_wrap.configure(highlightbackground=C["border"], highlightthickness=1)
+        card_wrap.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+
+        tv = tk.Text(
+            card_wrap, bg=C["card_inner"], fg=C["text"], fill="both",
+            font=FONT_MONO, bd=0, padx=8, pady=8, state="normal"
+        )
+        tv.pack(fill="both", expand=True, padx=2, pady=2)
+
+        if extended_logger.EXTENDED_LOG_FILE.exists():
+            try:
+                with open(extended_logger.EXTENDED_LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
+                    tv.insert("end", f.read())
+            except Exception as e:
+                tv.insert("end", t("ext_logs_error").format(e))
+        else:
+            tv.insert("end", t("ext_logs_empty"))
+            
+        tv.see("end")
+        tv.config(state="disabled")
+
+    def show_log_history_dialog(self):
+        """Окно просмотра истории логов с синхронизацией из файла."""
+        dlg = tk.Toplevel(self)
+        dlg.title(t("dlg_log_history_title"))
+        dlg.geometry("860x580")
+        dlg.minsize(740, 480)
+        dlg.configure(bg=C["bg"])
+
+        top_f = tk.Frame(dlg, bg=C["bg"])
+        top_f.pack(fill="x", padx=16, pady=(14, 8))
+
+        tk.Label(
+            top_f, text=t("dlg_log_history_title"), font=FONT_TITLE,
+            fg=C["accent_blue"], bg=C["bg"]
+        ).pack(side="left")
+
+        dlg_stats_lbl = tk.Label(
+            top_f,
+            text=t("lbl_log_stats", file="integrations.log", size=integrations_manager.logger.get_file_size_str()),
+            font=FONT_SUB, fg=C["subtext"], bg=C["bg"]
+        )
+        dlg_stats_lbl.pack(side="right")
+
+        # Панель кнопок управления логами
+        bar = tk.Frame(dlg, bg=C["bg"])
+        bar.pack(fill="x", padx=16, pady=(0, 8))
+
+        card_wrap = tk.Frame(dlg, bg=C["card"], bd=1, relief="solid")
+        card_wrap.configure(highlightbackground=C["border"], highlightthickness=1)
+        card_wrap.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+
+        txt = tk.Text(
+            card_wrap, bg="#11111b", fg=C["fg"], insertbackground=C["fg"],
+            selectbackground=C["border"], font=FONT_MONO, wrap="word",
+            relief="flat", bd=0, padx=10, pady=10
+        )
+        sc = ttk.Scrollbar(card_wrap, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=sc.set)
+        txt.pack(side="left", fill="both", expand=True)
+        sc.pack(side="right", fill="y")
+
+        txt.tag_config("TIMESTAMP", foreground="#6c7086")
+        txt.tag_config("INFO", foreground="#cdd6f4")
+        txt.tag_config("SUCCESS", foreground=C["green"])
+        txt.tag_config("WARN", foreground=C["yellow"])
+        txt.tag_config("ERROR", foreground=C["red"])
+        txt.tag_config("STEP", foreground=C["accent_blue"], font=FONT_MONO_BOLD)
+        txt.tag_config("SYSTEM", foreground=C["accent_mauve"])
+
+        def load_content():
+            content = integrations_manager.logger.read_history()
+            txt.config(state="normal")
+            txt.delete("1.0", "end")
+            for line in content.splitlines():
+                lvl = "INFO"
+                if "[SUCCESS]" in line:
+                    lvl = "SUCCESS"
+                elif "[WARN]" in line:
+                    lvl = "WARN"
+                elif "[ERROR]" in line:
+                    lvl = "ERROR"
+                elif "[STEP]" in line:
+                    lvl = "STEP"
+                elif "[SYSTEM]" in line:
+                    lvl = "SYSTEM"
+                txt.insert("end", line + "\n", lvl)
+            txt.see("end")
+            txt.config(state="disabled")
+            sz = integrations_manager.logger.get_file_size_str()
+            dlg_stats_lbl.config(text=t("lbl_log_stats", file="integrations.log", size=sz))
+
+        def copy_all():
+            content = integrations_manager.logger.read_history()
+            self.clipboard_clear()
+            self.clipboard_append(content)
+            messagebox.showinfo(t("app_name"), t("msg_copied_clipboard"), parent=dlg)
+
+        def clear_file():
+            if messagebox.askyesno(t("app_name"), t("msg_confirm_clear_log"), parent=dlg):
+                integrations_manager.logger.clear_history()
+                load_content()
+                self._update_log_stats_label()
+                messagebox.showinfo(t("app_name"), t("msg_log_cleared"), parent=dlg)
+
+        btn_reload = tk.Button(
+            bar, text=t("btn_reload_log"), font=FONT_BOLD,
+            bg=C["accent_blue"], fg="#11111b", activebackground="#b4befe",
+            bd=0, padx=12, pady=5, cursor="hand2", command=load_content
+        )
+        btn_reload.pack(side="left", padx=(0, 6))
+
+        btn_copy = tk.Button(
+            bar, text=t("btn_copy_all"), font=FONT_MAIN,
+            bg=C["card_inner"], fg=C["fg"], activebackground=C["border"],
+            bd=0, padx=12, pady=5, cursor="hand2", command=copy_all
+        )
+        btn_copy.pack(side="left", padx=6)
+
+        btn_clear = tk.Button(
+            bar, text=t("btn_clear_log_file"), font=FONT_MAIN,
+            bg=C["card_inner"], fg=C["red"], activebackground=C["border"],
+            bd=0, padx=12, pady=5, cursor="hand2", command=clear_file
+        )
+        btn_clear.pack(side="left", padx=6)
+
+        btn_close = tk.Button(
+            bar, text=t("btn_close_dialog"), font=FONT_MAIN,
+            bg=C["card_inner"], fg=C["subtext"], activebackground=C["border"],
+            bd=0, padx=12, pady=5, cursor="hand2", command=dlg.destroy
+        )
+        btn_close.pack(side="right")
+
+        load_content()
+
+    # =========================================================================
     # ОБЩАЯ ЛОГИКА И СТАТУС
     # =========================================================================
     def on_global_refresh(self):
         """Кнопка 'Проверить всё'."""
+        token_vault_manager.ensure_locked()
         self.refresh_routes_async()
         if self.active_tab == "proxy":
             self.check_current_proxy_page_async()
@@ -2036,6 +3394,8 @@ class HerdrConfigApp(tk.Tk):
             self.render_strategy_page()
         elif self.active_tab == "backup":
             self.render_backup_page()
+        elif self.active_tab == "integrations":
+            self.on_integrations_status_click()
 
     def refresh_routes_async(self):
         """Запуск фоновой проверки маршрутов."""
@@ -2047,8 +3407,20 @@ class HerdrConfigApp(tk.Tk):
         self.quick_status.config(text="● Опрос WSL2 и маршрутов...", fg=C["yellow"])
 
         def worker():
-            res = sync_manager.check_all_routes()
-            self.after(0, self._apply_route_results, res)
+            try:
+                res = sync_manager.check_all_routes()
+                if not getattr(self, "_closing", False):
+                    self.after(0, self._apply_route_results, res)
+            except Exception as e:
+                def _handle_err():
+                    self.is_checking_routes = False
+                    self.refresh_btn.config(state="normal", text=t("btn_check_all"))
+                    self.quick_status.config(text=f"✕ Ошибка проверки: {e}", fg=C["red"])
+                try:
+                    if not getattr(self, "_closing", False):
+                        self.after(0, _handle_err)
+                except Exception:
+                    pass
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2096,11 +3468,29 @@ class HerdrConfigApp(tk.Tk):
             )
 
         # 2. Gemini
-        active_port = gemini.get("port", 1081)
+        active_port = gemini.get("port", gemini_manager.BASE_SOCKS5_PORT)
         active_route = gemini.get("route", f"socks5h://127.0.0.1:{active_port}")
         self.gemini_route_lbl.config(text=f"{active_route} ({t('pill_socks5')})")
 
-        if gemini.get("failover_occurred"):
+        if gemini.get("failback_occurred"):
+            fb_msg = gemini.get("failback_msg", "Auto-failback to bound proxy")
+            lat = gemini.get("latency_ms")
+            lat_str = f" ({lat} ms)" if lat else ""
+            self.gemini_status_lbl.config(
+                text=f"✓ {fb_msg}",
+                fg=C["green"]
+            )
+            self.gemini_ping_lbl.config(
+                text=f"SOCKS5 :{active_port}{lat_str}",
+                fg=C["green"]
+            )
+            self.load_gemini_profiles_data()
+            self.load_proxies_data()
+            if self.active_tab == "gemini":
+                self.render_gemini_page()
+            elif self.active_tab == "proxy":
+                self.render_proxy_table()
+        elif gemini.get("failover_occurred"):
             fo_msg = gemini.get("failover_msg", "Auto-failover triggered")
             lat = gemini.get("latency_ms")
             lat_str = f" ({lat} ms)" if lat else ""
@@ -2119,6 +3509,19 @@ class HerdrConfigApp(tk.Tk):
                 self.render_gemini_page()
             elif self.active_tab == "proxy":
                 self.render_proxy_table()
+        elif gemini.get("in_failover"):
+            target_port = gemini.get("bound_port", gemini_manager.BASE_SOCKS5_PORT)
+            rem_s = gemini.get("next_failback_sec", 0)
+            lat = gemini.get("latency_ms")
+            lat_str = f" ({lat} ms)" if lat else ""
+            self.gemini_status_lbl.config(
+                text=f"🔄 Failover :{active_port} ➔ Стремится к :{target_port} (возврат через {rem_s}с)",
+                fg=C["accent_peach"]
+            )
+            self.gemini_ping_lbl.config(
+                text=f"SOCKS5 :{active_port}{lat_str}",
+                fg=C["green"] if gemini.get("online") else C["red"]
+            )
         elif gemini.get("online"):
             self.gemini_status_lbl.config(
                 text=t("route_gemini_active", port=active_port),
@@ -2140,32 +3543,124 @@ class HerdrConfigApp(tk.Tk):
             )
 
         # 3. Claude
-        if claude.get("online"):
-            self.claude_status_lbl.config(
-                text=t("route_claude_active"),
-                fg=C["green"]
-            )
-            self.claude_ip_lbl.config(
-                text=t("route_claude_ip", ip=claude.get('ip', 'Unknown'))
-            )
-            lat = claude.get("latency_ms")
-            self.claude_ping_lbl.config(
-                text=t("route_claude_ping", lat=lat),
-                fg=C["green"]
-            )
-        else:
-            self.claude_status_lbl.config(
-                text=f"✕ {claude.get('status_text')}",
-                fg=C["red"]
-            )
-            self.claude_ip_lbl.config(text=claude.get("ip", "Unknown"))
-            self.claude_ping_lbl.config(text=t("route_claude_offline"), fg=C["red"])
+        self._last_claude_accessible = claude.get("online", False)
+        self._apply_claude_route_ui(claude)
 
         # 4. Общий статус
         if herdr.get("server_running") and gemini.get("online") and claude.get("online"):
             self.quick_status.config(text=t("status_herdr_active"), fg=C["green"])
         else:
             self.quick_status.config(text=t("status_monitoring_ok"), fg=C["yellow"])
+
+    def _apply_claude_route_ui(self, claude: dict):
+        """Обновляет элементы интерфейса маршрута Claude Code."""
+        c_host = claude.get("host", settings_manager.get_claude_proxy_host())
+        c_port = claude.get("port", settings_manager.get_claude_proxy_port())
+        c_http_port = claude.get("http_port", 10000 + c_port)
+        ks_engaged = claude.get("killswitch_engaged", False)
+        ks_enabled = claude.get("killswitch_enabled", True)
+
+        if hasattr(self, "claude_host_var") and c_host:
+            self.claude_host_var.set(str(c_host))
+        if hasattr(self, "claude_port_var") and c_port:
+            self.claude_port_var.set(str(c_port))
+        self._update_claude_proxy_combo()
+
+        if hasattr(self, "claude_ks_cb"):
+            self.claude_ks_cb.config(fg=C["red"] if ks_enabled else C["subtext"])
+
+        if claude.get("online"):
+            if hasattr(self, "claude_pill"):
+                self.claude_pill.config(text=t("pill_claude_proxy"), bg=C["green"], fg="#11111b")
+            self.claude_status_lbl.config(
+                text=claude.get("status_text", t("route_claude_active", host=c_host, port=c_port)),
+                fg=C["green"]
+            )
+            ip_str = claude.get("ip", "-")
+            co_str = claude.get("country", "")
+            lbl_ip = f"{ip_str} ({co_str})" if co_str and co_str != "undefined" else ip_str
+            self.claude_ip_lbl.config(text=t("route_claude_ip", ip=lbl_ip), fg=C["accent_peach"])
+            if hasattr(self, "claude_route_lbl"):
+                self.claude_route_lbl.config(text=f"http://{c_host}:{c_http_port} (SOCKS5 :{c_port})")
+            lat = claude.get("latency_ms")
+            self.claude_ping_lbl.config(
+                text=t("route_claude_ping", lat=lat),
+                fg=C["green"]
+            )
+        elif ks_engaged:
+            if hasattr(self, "claude_pill"):
+                self.claude_pill.config(text=t("pill_killswitch_engaged"), bg=C["red"], fg="#ffffff")
+            self.claude_status_lbl.config(
+                text=claude.get("status_text", t("route_claude_killswitch_active", host=c_host, port=c_port)),
+                fg=C["red"]
+            )
+            self.claude_ip_lbl.config(text=t("claude_safe_killswitch"), fg=C["red"])
+            if hasattr(self, "claude_route_lbl"):
+                self.claude_route_lbl.config(text=f"http://{c_host}:{c_http_port} [KILLSWITCH BLOCK]")
+            self.claude_ping_lbl.config(text="Ожидание восстановления прокси...", fg=C["red"])
+        else:
+            if hasattr(self, "claude_pill"):
+                self.claude_pill.config(text="✕ ОФЛАЙН", bg=C["subtext"], fg="#ffffff")
+            self.claude_status_lbl.config(
+                text=claude.get("status_text", f"✕ {t('route_claude_offline')}"),
+                fg=C["red"]
+            )
+            self.claude_ip_lbl.config(text=claude.get("ip", "-"), fg=C["subtext"])
+            if hasattr(self, "claude_route_lbl"):
+                self.claude_route_lbl.config(text=f"http://{c_host}:{c_http_port}")
+            self.claude_ping_lbl.config(text=t("route_claude_offline"), fg=C["red"])
+
+    def _schedule_fast_port_check(self):
+        """Регулярный быстрый опрос локальных SOCKS5-портов и мгновенное управление Killswitch."""
+        if self._closing:
+            return
+
+        interval_sec = settings_manager.get_port_check_interval()
+        interval_ms = int(interval_sec * 1000)
+
+        if not self._is_checking_fast_ports:
+            self._is_checking_fast_ports = True
+
+            def worker():
+                claude_res = None
+                ports_changed = False
+                try:
+                    # 1. Быстрый опрос статуса локальных портов из proxies.json
+                    ports_changed = proxy_manager.refresh_local_ports_status(self.proxies, timeout=0.15)
+                    if ports_changed:
+                        proxy_manager.save_proxies(self.proxies)
+
+                    # 2. Быстрая проверка целевого порта Claude Code
+                    c_host = settings_manager.get_claude_proxy_host()
+                    c_port = settings_manager.get_claude_proxy_port()
+                    c_ks = settings_manager.get_claude_killswitch()
+                    port_ok = claude_manager.check_port_accessible(c_host, c_port, timeout=0.15)
+
+                    if self._last_claude_accessible != port_ok:
+                        self._last_claude_accessible = port_ok
+                        claude_res = claude_manager.probe_claude_route(
+                            host=c_host, port=c_port, killswitch=c_ks, fast=True
+                        )
+                except Exception:
+                    pass
+                finally:
+                    self._is_checking_fast_ports = False
+
+                if not self._closing:
+                    self.after(0, self._apply_fast_port_results, claude_res, ports_changed)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        if not self._closing:
+            self.after(interval_ms, self._schedule_fast_port_check)
+
+    def _apply_fast_port_results(self, claude_res: dict | None, ports_changed: bool):
+        if self._closing:
+            return
+        if ports_changed and self.active_tab == "proxy":
+            self.render_proxy_table()
+        if claude_res is not None:
+            self._apply_claude_route_ui(claude_res)
 
     def _schedule_auto_refresh(self):
         if self.auto_refresh_enabled.get() and not self.is_checking_routes:
@@ -2177,31 +3672,36 @@ class HerdrConfigApp(tk.Tk):
         except Exception:
             pass
 
-        self.after(30000, self._schedule_auto_refresh)
+        self.after(15000, self._schedule_auto_refresh)
 
     # ── Системный трей ──────────────────────────────────────────
     def _init_tray(self):
         if not HAS_TRAY:
             return
 
-        icon_img = make_tray_icon()
+        icon_img = make_tray_icon("blue")
         menu = pystray.Menu(
             pystray.MenuItem(t("tray_show"), self.show_window, default=True),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem(t("tray_exit"), self.quit_app)
         )
-        self.tray_icon = pystray.Icon("herdr_router", icon_img, "Herdr AI Control Center", menu)
+        self.tray_icon = pystray.Icon("herdr_router", icon_img, t("app_name"), menu)
 
-        def run_tray():
-            try:
-                self.tray_icon.run()
-            except Exception:
-                pass
-
-        threading.Thread(target=run_tray, daemon=True).start()
+        try:
+            self.tray_icon.run_detached()
+        except Exception:
+            pass
 
     def on_close_button(self):
-        if HAS_TRAY and self.tray_icon:
+        if HAS_TRAY:
+            if not self.tray_icon:
+                self._init_tray()
             self.withdraw()
+            try:
+                if self.tray_icon:
+                    self.tray_icon.notify(t("tray_minimized_msg"), t("app_name"))
+            except Exception:
+                pass
         else:
             self.destroy()
 
@@ -2220,23 +3720,59 @@ class HerdrConfigApp(tk.Tk):
         self.after(0, self.bring_to_front)
 
     def quit_app(self, icon=None, item=None):
-        if self.tray_icon:
+        self.after(0, self.destroy)
+
+    def destroy(self):
+        self._closing = True
+        if hasattr(self, "_on_integration_log_cb"):
+            try:
+                integrations_manager.logger.remove_listener(self._on_integration_log_cb)
+            except Exception:
+                pass
+        if hasattr(self, "tray_icon") and self.tray_icon:
             try:
                 self.tray_icon.stop()
             except Exception:
                 pass
-        self.after(0, self.destroy)
+            self.tray_icon = None
+        super().destroy()
+_INSTANCE_SOCKET = None
+
+
+def _acquire_instance_lock() -> bool:
+    """Захватывает сокет единственного экземпляра приложения на порту SINGLE_INSTANCE_PORT (38123)."""
+    global _INSTANCE_SOCKET
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", SINGLE_INSTANCE_PORT))
+        s.listen(5)
+        _INSTANCE_SOCKET = s
+        return True
+    except OSError:
+        return False
+
+
+def _release_instance_lock() -> None:
+    """Освобождает сокет приложения."""
+    global _INSTANCE_SOCKET
+    if _INSTANCE_SOCKET is not None:
+        try:
+            _INSTANCE_SOCKET.close()
+        except Exception:
+            pass
+        _INSTANCE_SOCKET = None
 
 
 def start_instance_server(app: HerdrConfigApp):
+    """Слушает входящие сигналы SHOW на уже захваченном сокете для передачи фокуса главному окну."""
+    global _INSTANCE_SOCKET
+    if _INSTANCE_SOCKET is None:
+        return
+
     def server_loop():
-        try:
-            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            srv.bind(("127.0.0.1", SINGLE_INSTANCE_PORT))
-            srv.listen(5)
-            while True:
-                conn, _ = srv.accept()
+        while _INSTANCE_SOCKET:
+            try:
+                conn, _ = _INSTANCE_SOCKET.accept()
                 with conn:
                     try:
                         data = conn.recv(1024)
@@ -2244,31 +3780,78 @@ def start_instance_server(app: HerdrConfigApp):
                             app.after(0, app.bring_to_front)
                     except Exception:
                         pass
-        except Exception:
-            pass
+            except Exception:
+                break
 
     t = threading.Thread(target=server_loop, daemon=True)
     t.start()
 
 
-def main():
+def _show_already_running_notice(duration_ms: int = 1200) -> None:
+    """Отображает окно уведомления о том, что программа уже запущена, на duration_ms миллисекунд и закрывается."""
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(0.6)
-            s.connect(("127.0.0.1", SINGLE_INSTANCE_PORT))
-            s.sendall(b"SHOW\n")
-            sys.exit(0)
-    except (ConnectionRefusedError, OSError):
+        root = tk.Tk()
+        root.title("Herdr Control Center")
+        root.overrideredirect(True)
+        root.attributes("-topmost", True)
+        root.configure(bg="#1e1e2e")
+
+        frame = tk.Frame(root, bg="#1e1e2e", highlightbackground="#89b4fa", highlightthickness=2, padx=24, pady=16)
+        frame.pack(fill="both", expand=True)
+
+        tk.Label(
+            frame,
+            text="⚠️  " + t("already_running"),
+            font=("Segoe UI", 11, "bold"),
+            fg="#cdd6f4",
+            bg="#1e1e2e"
+        ).pack()
+
+        root.update_idletasks()
+        w = root.winfo_reqwidth()
+        h = root.winfo_reqheight()
+        sw = root.winfo_screenwidth()
+        sh = root.winfo_screenheight()
+        x = (sw - w) // 2
+        y = (sh - h) // 2
+        root.geometry(f"{w}x{h}+{x}+{y}")
+
+        root.after(duration_ms, root.destroy)
+        root.mainloop()
+    except Exception:
         pass
 
+
+def main():
+    print(f"[{time.strftime('%X')}] main() start PID={os.getpid()}", flush=True)
+    if not _acquire_instance_lock():
+        print(f"[{time.strftime('%X')}] PID={os.getpid()} _acquire_instance_lock failed! Already running.", flush=True)
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.3)
+                s.connect(("127.0.0.1", SINGLE_INSTANCE_PORT))
+                s.sendall(b"SHOW\n")
+        except Exception:
+            pass
+        _show_already_running_notice(1200)
+        return 0
+
+    print(f"[{time.strftime('%X')}] PID={os.getpid()} lock acquired, initializing HerdrConfigApp", flush=True)
     try:
         app = HerdrConfigApp()
+        print(f"[{time.strftime('%X')}] PID={os.getpid()} HerdrConfigApp initialized, starting server", flush=True)
         start_instance_server(app)
+        print(f"[{time.strftime('%X')}] PID={os.getpid()} entering mainloop", flush=True)
         app.mainloop()
+        print(f"[{time.strftime('%X')}] PID={os.getpid()} mainloop exited cleanly", flush=True)
     except BaseException:
+        print(f"[{time.strftime('%X')}] PID={os.getpid()} EXCEPTION in mainloop:", flush=True)
+        traceback.print_exc()
         with open(BASE_DIR / "crash.log", "w", encoding="utf-8") as f:
             traceback.print_exc(file=f)
         raise
+    finally:
+        _release_instance_lock()
 
 
 if __name__ == "__main__":

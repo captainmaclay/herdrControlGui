@@ -28,42 +28,178 @@ PROXIES_FILE = BASE_DIR / "proxies.json"
 DEFAULT_HOST = "127.0.0.1"
 BASE_PORT = 1081
 PAGE_SIZE = 10
+VLESS2SOCKS_INSTANCES_FILE: Path | None = None
 
 
-def load_proxies() -> list[dict[str, Any]]:
-    """Загружает список прокси из proxies.json.
-    
-    Если файл отсутствует, создает начальный список с портом 1081.
-    """
-    if not PROXIES_FILE.exists():
-        initial = [
-            {
-                "id": 1,
-                "host": DEFAULT_HOST,
-                "port": BASE_PORT,
-                "label": "Xray SOCKS5 (Основной)",
-                "status": "unknown",  # "online", "offline", "unknown"
+def find_vless2socks_instances_file() -> Path | None:
+    """Ищет файл instances.json от проекта vless2socks."""
+    if VLESS2SOCKS_INSTANCES_FILE is not None:
+        return VLESS2SOCKS_INSTANCES_FILE if VLESS2SOCKS_INSTANCES_FILE.exists() else None
+    candidates = [
+        BASE_DIR.parent / "vless2socks" / "instances.json",
+        Path("D:/My files/vless2socks/instances.json"),
+        BASE_DIR / "instances.json",
+    ]
+    env_dir = os.environ.get("VLESS2SOCKS_DIR")
+    if env_dir:
+        candidates.insert(0, Path(env_dir) / "instances.json")
+    for c in candidates:
+        try:
+            if c.exists() and c.is_file():
+                return c
+        except Exception:
+            pass
+    return None
+
+
+def sync_from_vless2socks(instances_path: Path | None = None) -> list[dict[str, Any]]:
+    """Синхронизирует прокси из instances.json проекта vless2socks в proxies.json."""
+    path = instances_path or find_vless2socks_instances_file()
+    if not path or not path.exists():
+        return []
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            v_data = json.load(f)
+        if not isinstance(v_data, list):
+            return []
+    except Exception:
+        return []
+
+    current_proxies = []
+    if PROXIES_FILE.exists():
+        try:
+            with open(PROXIES_FILE, "r", encoding="utf-8") as f:
+                current_proxies = json.load(f)
+                if not isinstance(current_proxies, list):
+                    current_proxies = []
+        except Exception:
+            current_proxies = []
+
+    existing_by_port = {p.get("port"): p for p in current_proxies if isinstance(p.get("port"), int)}
+    changed = False
+
+    import urllib.parse
+
+    for inst in v_data:
+        listen = inst.get("listen", "127.0.0.1:1081")
+        h, p_str = (listen.split(":") + ["1081"])[:2]
+        try:
+            port = int(p_str)
+        except ValueError:
+            continue
+        host = h.strip() or DEFAULT_HOST
+
+        raw_name = (inst.get("name") or "").strip()
+        url = inst.get("url", "")
+        if not raw_name and "#" in url:
+            try:
+                raw_name = urllib.parse.unquote(url.split("#", 1)[1]).strip()
+            except Exception:
+                pass
+
+        label = raw_name or ("System Proxy" if port == 1015 else f"SOCKS5 :{port}")
+
+        if port in existing_by_port:
+            entry = existing_by_port[port]
+            if "claude" not in entry:
+                entry["claude"] = True if port == 1015 else False
+                changed = True
+            if raw_name and entry.get("label") != raw_name:
+                entry["label"] = raw_name
+                changed = True
+        else:
+            existing_ids = [p.get("id", 0) for p in current_proxies if isinstance(p.get("id"), int)]
+            new_id = max(existing_ids, default=0) + 1
+            new_entry = {
+                "id": new_id,
+                "host": host,
+                "port": port,
+                "label": label,
+                "status": "unknown",
                 "ip": "-",
                 "country": "undefined",
                 "latency_ms": None,
                 "last_checked": None,
+                "claude": True if port == 1015 else False,
             }
-        ]
-        save_proxies(initial)
-        return initial
+            current_proxies.append(new_entry)
+            existing_by_port[port] = new_entry
+            changed = True
+
+    if changed or not PROXIES_FILE.exists():
+        def sort_key(p):
+            port = p.get("port", 99999)
+            return (0 if port == 1015 else 1, port)
+        current_proxies.sort(key=sort_key)
+        for i, p in enumerate(current_proxies, 1):
+            p["id"] = i
+        save_proxies(current_proxies)
+
+    return current_proxies
+
+
+def load_proxies(refresh_status: bool = False) -> list[dict[str, Any]]:
+    """Загружает список прокси из proxies.json с автосинхронизацией из vless2socks.
+    
+    Если файл отсутствует, создает начальный список с портами 1015 и 1081.
+    Если refresh_status=True, выполняет быструю проверку локальных портов и обновляет статус.
+    """
+    data = []
+    if PROXIES_FILE.exists():
+        try:
+            with open(PROXIES_FILE, "r", encoding="utf-8") as f:
+                d = json.load(f)
+                if isinstance(d, list) and len(d) > 0:
+                    data = d
+        except Exception:
+            data = []
+
+    if not data and not PROXIES_FILE.exists():
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass and (Path(meipass) / "proxies.json").exists():
+            try:
+                with open(Path(meipass) / "proxies.json", "r", encoding="utf-8") as mf:
+                    b_data = json.load(mf)
+                if isinstance(b_data, list) and len(b_data) > 0:
+                    data = b_data
+            except Exception:
+                pass
 
     try:
-        with open(PROXIES_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if isinstance(data, list) and len(data) > 0:
-                return data
+        v_file = find_vless2socks_instances_file()
+        if v_file:
+            synced = sync_from_vless2socks(v_file)
+            if synced:
+                if refresh_status and refresh_local_ports_status(synced):
+                    save_proxies(synced)
+                return synced
     except Exception:
         pass
 
-    # Fallback
+    if data:
+        for p in data:
+            if "claude" not in p:
+                p["claude"] = True if p.get("port") == 1015 else False
+        if refresh_status and refresh_local_ports_status(data):
+            save_proxies(data)
+        return data
+
     fallback = [
         {
             "id": 1,
+            "host": DEFAULT_HOST,
+            "port": 1015,
+            "label": "System Proxy",
+            "status": "unknown",
+            "ip": "-",
+            "country": "undefined",
+            "latency_ms": None,
+            "last_checked": None,
+            "claude": True,
+        },
+        {
+            "id": 2,
             "host": DEFAULT_HOST,
             "port": BASE_PORT,
             "label": "Xray SOCKS5 (Основной)",
@@ -72,8 +208,11 @@ def load_proxies() -> list[dict[str, Any]]:
             "country": "undefined",
             "latency_ms": None,
             "last_checked": None,
+            "claude": False,
         }
     ]
+    if refresh_status:
+        refresh_local_ports_status(fallback)
     save_proxies(fallback)
     return fallback
 
@@ -93,6 +232,13 @@ def save_proxies(proxies: list[dict[str, Any]]) -> None:
                 pass
 
 
+def get_next_available_port() -> int:
+    """Вычисляет следующий свободный порт начиная с BASE_PORT (1081)."""
+    proxies = load_proxies()
+    valid_ports = [p.get("port") for p in proxies if isinstance(p.get("port"), int) and p.get("port") >= BASE_PORT]
+    return max(valid_ports) + 1 if valid_ports else BASE_PORT
+
+
 def add_proxy(
     host: str = DEFAULT_HOST,
     port: int | None = None,
@@ -105,11 +251,7 @@ def add_proxy(
     proxies = load_proxies()
 
     if port is None:
-        existing_ports = [p.get("port", BASE_PORT) for p in proxies if isinstance(p.get("port"), int)]
-        if existing_ports:
-            port = max(existing_ports) + 1
-        else:
-            port = BASE_PORT
+        port = get_next_available_port()
 
     existing_ids = [p.get("id", 0) for p in proxies if isinstance(p.get("id"), int)]
     new_id = max(existing_ids, default=0) + 1
@@ -127,6 +269,7 @@ def add_proxy(
         "country": "undefined",
         "latency_ms": None,
         "last_checked": None,
+        "claude": True if int(port) == 1015 else False,
     }
     proxies.append(new_proxy)
     save_proxies(proxies)
@@ -144,6 +287,30 @@ def delete_proxy(proxy_id: int) -> bool:
     return False
 
 
+def set_proxy_claude_flag(port: int, enabled: bool) -> bool:
+    """Устанавливает или снимает флаг Claude для прокси по указанному порту."""
+    proxies = load_proxies()
+    found = False
+    for p in proxies:
+        if p.get("port") == port:
+            p["claude"] = bool(enabled)
+            found = True
+            break
+    if found:
+        save_proxies(proxies)
+        return True
+    return False
+
+
+def get_proxy_claude_flag(port: int) -> bool:
+    """Возвращает статус флага Claude для прокси (для 1015 по умолчанию True, для остальных False)."""
+    proxies = load_proxies()
+    for p in proxies:
+        if p.get("port") == port:
+            return bool(p.get("claude", True if port == 1015 else False))
+    return True if port == 1015 else False
+
+
 def check_port_accessible(host: str, port: int, timeout: float = 1.0) -> bool:
     """Быстрая проверка открытости порта."""
     try:
@@ -151,6 +318,68 @@ def check_port_accessible(host: str, port: int, timeout: float = 1.0) -> bool:
             return True
     except (OSError, socket.timeout):
         return False
+
+
+def check_socks5_handshake(host: str, port: int, timeout: float = 0.15) -> bool:
+    """Быстрая проверка доступности и рукопожатия SOCKS5."""
+    try:
+        s = socket.create_connection((host, port), timeout=timeout)
+        s.sendall(b"\x05\x01\x00")
+        resp = s.recv(2)
+        s.close()
+        return resp == b"\x05\x00"
+    except Exception:
+        return False
+
+
+def refresh_local_ports_status(proxies: list[dict[str, Any]], timeout: float = 0.15) -> bool:
+    """Быстро и в реальном времени проверяет статус локальных SOCKS5-портов (127.0.0.1/localhost) в пуле потоков.
+    
+    - Если локальный порт закрыт или не отвечает на SOCKS5 рукопожатие:
+      помечает его 'offline', сбрасывает ip/country/latency, исключая ложный статус 'online'.
+    - Если локальный SOCKS5-порт отвечает, но числился 'offline' или 'unknown':
+      помечает 'online'.
+    Возвращает True, если хотя бы один статус изменился.
+    """
+    if not proxies:
+        return False
+
+    local_items = []
+    for idx, p in enumerate(proxies):
+        host = p.get("host", DEFAULT_HOST)
+        port = p.get("port")
+        if host in ("127.0.0.1", "localhost", "::1") and isinstance(port, int):
+            local_items.append((idx, host, port))
+
+    if not local_items:
+        return False
+
+    changed = False
+
+    def _check(item):
+        idx, host, port = item
+        return idx, check_socks5_handshake(host, port, timeout=timeout)
+
+    max_workers = min(10, len(local_items))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        results = list(executor.map(_check, local_items))
+
+    for idx, is_alive in results:
+        p = proxies[idx]
+        cur_status = p.get("status")
+        if is_alive:
+            if cur_status != "online":
+                p["status"] = "online"
+                changed = True
+        else:
+            if cur_status != "offline":
+                p["status"] = "offline"
+                p["ip"] = "-"
+                p["country"] = "undefined"
+                p["latency_ms"] = None
+                changed = True
+
+    return changed
 
 
 def probe_single_proxy(proxy: dict[str, Any], timeout: float = 4.0) -> dict[str, Any]:
@@ -286,9 +515,15 @@ def find_best_fallback_proxy(
     """Ищет рабочий резервный SOCKS5-прокси при сбое текущего.
     
     Приоритет отдается прокси из той же страны (если указана и определена).
+    Прокси с флагом Claude строго исключаются из кандидатов для Gemini.
     """
     proxies = load_proxies()
-    candidates = [p for p in proxies if p.get("port") != failed_port]
+    candidates = [
+        p for p in proxies 
+        if p.get("port") != failed_port 
+        and not p.get("claude", False) 
+        and not get_proxy_claude_flag(p.get("port"))
+    ]
     if not candidates:
         return None
 
@@ -333,4 +568,44 @@ def find_best_fallback_proxy(
                 continue
 
     return None
+
+
+def get_proxy_choices(exclude_claude: bool = True) -> list[dict[str, Any]]:
+    """Возвращает форматированный список прокси для выпадающего меню выбора в UI.
+    
+    По умолчанию исключает прокси с установленным флагом Claude, чтобы они не использовались в Gemini.
+    """
+    proxies = load_proxies(refresh_status=True)
+    valid_proxies = [
+        p for p in proxies 
+        if isinstance(p.get("port"), int)
+        and (not exclude_claude or (not p.get("claude", False) and not get_proxy_claude_flag(p.get("port"))))
+    ]
+    valid_proxies.sort(key=lambda x: x["port"])
+
+    choices = []
+    for idx, p in enumerate(valid_proxies, start=1):
+        port = p["port"]
+        proxy_num = (port - BASE_PORT + 1) if port >= BASE_PORT else idx
+        co = p.get("country", "undefined")
+        co_str = f" • {co}" if co and co not in ("undefined", "-") else ""
+        ip = p.get("ip", "-")
+        ip_str = f" ({ip})" if ip and ip != "-" else ""
+        st = p.get("status", "unknown")
+        st_icon = "🟢 " if st == "online" else ("🔴 " if st == "offline" else "⚪ ")
+
+        display = f"{st_icon}Proxy {proxy_num} (:{port}){co_str}{ip_str}"
+        title = f"Proxy {proxy_num} (:{port})"
+
+        choices.append({
+            "port": port,
+            "proxy_num": proxy_num,
+            "title": title,
+            "display": display,
+            "ip": ip,
+            "country": co,
+            "status": st,
+        })
+    return choices
+
 

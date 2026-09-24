@@ -1,0 +1,48 @@
+# PyCharm & JetBrains IDEs
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+*.spec
+
+# Logs & Databases
+*.log
+*.sqlite3
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# Backups and temporary files
+*.bak
+*.swp
+*~
+*.hbak
+
+# Runtime generated / dynamic history files
+strategy_history.json
+.herdrControlGui.lock
+
+# Nested redundant project folders if any
+herdrControlGui/

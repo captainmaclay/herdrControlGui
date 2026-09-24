@@ -2,12 +2,61 @@
   {
     "id": 1,
     "host": "127.0.0.1",
-    "port": 1081,
-    "label": "SOCKS5 :1081",
-    "status": "unknown",
+    "port": 1015,
+    "label": "System Proxy",
+    "status": "online",
     "ip": "-",
     "country": "undefined",
     "latency_ms": null,
-    "last_checked": null
+    "last_checked": null,
+    "claude": true
+  },
+  {
+    "id": 2,
+    "host": "127.0.0.1",
+    "port": 1081,
+    "label": "🇫🇮 FINLAND 3 VLESS TCP",
+    "status": "offline",
+    "ip": "-",
+    "country": "undefined",
+    "latency_ms": null,
+    "last_checked": null,
+    "claude": false
+  },
+  {
+    "id": 3,
+    "host": "127.0.0.1",
+    "port": 1082,
+    "label": "🇫🇮 FINLAND 4 VLESS TCP",
+    "status": "online",
+    "ip": "-",
+    "country": "undefined",
+    "latency_ms": null,
+    "last_checked": null,
+    "claude": false
+  },
+  {
+    "id": 4,
+    "host": "127.0.0.1",
+    "port": 1083,
+    "label": "🇫🇷 FRANCE 1 VLESS TCP",
+    "status": "online",
+    "ip": "-",
+    "country": "undefined",
+    "latency_ms": null,
+    "last_checked": null,
+    "claude": false
+  },
+  {
+    "id": 5,
+    "host": "127.0.0.1",
+    "port": 1084,
+    "label": "🇫🇮 FINLAND 2 VLESS TCP",
+    "status": "online",
+    "ip": "-",
+    "country": "undefined",
+    "latency_ms": null,
+    "last_checked": null,
+    "claude": false
   }
 ]
