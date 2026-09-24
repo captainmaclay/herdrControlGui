@@ -86,5 +86,19 @@ class VaultTests(unittest.TestCase):
         self.assertTrue(token_vault_manager.is_vault_locked())
         self.assertFalse(self.claude_cred.exists())
 
-if __name__ == '__main__':
-    unittest.main()
+
+
+    def test_global_metadata_update_trigger(self):
+        import time
+        from token_vault_manager import LAST_GLOBAL_METADATA_UPDATE
+        
+        # lock first
+        token_vault_manager.lock_tokens(self.password)
+        old_time = token_vault_manager.LAST_GLOBAL_METADATA_UPDATE
+        
+        time.sleep(0.1) # tiny sleep to ensure time difference
+        with token_vault_manager.auto_unlock_context(password=self.password):
+            pass # update should trigger
+            
+        new_time = token_vault_manager.LAST_GLOBAL_METADATA_UPDATE
+        self.assertGreater(new_time, old_time)

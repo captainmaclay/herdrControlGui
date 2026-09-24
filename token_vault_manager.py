@@ -140,6 +140,22 @@ def unlock_tokens(password: str) -> tuple[bool, str]:
     except Exception as e:
         return False, f"Ошибка при разблокировке: {e}"
 
+
+import time
+LAST_GLOBAL_METADATA_UPDATE = 0.0
+
+def update_all_metadata():
+    """Обновляет кеш метаданных с открытых токенов и сбрасывает таймер."""
+    global LAST_GLOBAL_METADATA_UPDATE
+    paths = _get_token_paths()
+    for p in paths:
+        if p.exists():
+            if ".gemini" in str(p):
+                gemini_manager.get_token_info(p, is_active=(p.parent.name == "antigravity-cli"))
+            elif ".claude" in str(p):
+                claude_oauth_manager.get_credentials_info(p)
+    LAST_GLOBAL_METADATA_UPDATE = time.time()
+
 from contextlib import contextmanager
 
 @contextmanager
@@ -153,6 +169,7 @@ def auto_unlock_context(password: str = None):
         unlock_tokens(password)
 
     try:
+        update_all_metadata()
         yield
     finally:
         if was_locked and password:

@@ -6,7 +6,7 @@ from pathlib import Path
 import backup_manager
 
 EXTENDED_LOG_FILE = backup_manager.BASE_DIR / "extended.log"
-MAX_LOG_BYTES = 5 * 1024 * 1024  # 5 MB
+MAX_LOG_BYTES = int(1.5 * 1024 * 1024)  # 1.5 MB
 
 def _rotate_extended_log():
     if not EXTENDED_LOG_FILE.exists():
@@ -65,8 +65,33 @@ def excepthook(exc_type, exc_value, exc_traceback):
     write_ext_log("ERROR", "".join(lines).strip())
     sys.__excepthook__(exc_type, exc_value, exc_traceback)
 
+
+def _hook_tkinter_events():
+    try:
+        import tkinter as tk
+        if hasattr(tk, 'CallWrapper'):
+            original_call = tk.CallWrapper.__call__
+            def hooked_call(self, *args):
+                try:
+                    func = self.func
+                    name = getattr(func, "__name__", None)
+                    if not name or name == "<lambda>":
+                        # Try to get method string if it's a bound method
+                        if hasattr(func, "__self__"):
+                            name = f"{func.__self__.__class__.__name__}.{func.__name__}"
+                        else:
+                            name = str(func)
+                    write_ext_log("UI_EVENT", f"Вызов функции или кнопки: {name}")
+                except Exception:
+                    pass
+                return original_call(self, *args)
+            tk.CallWrapper.__call__ = hooked_call
+    except ImportError:
+        pass
+
 def init_extended_logging():
     sys.stdout = StreamRedirector(sys.stdout, "INFO")
     sys.stderr = StreamRedirector(sys.stderr, "ERROR")
     sys.excepthook = excepthook
     write_ext_log("SYSTEM", "--- Приложение запущено ---")
+    _hook_tkinter_events()

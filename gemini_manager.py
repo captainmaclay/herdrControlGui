@@ -776,7 +776,7 @@ def list_profiles(skip_reassign: bool = False) -> list[dict[str, Any]]:
 
     for position, p in enumerate(profile_dirs, start=1):
         token_path = p / "antigravity-oauth-token"
-        token_exists = token_path.exists()
+        token_exists = token_path.exists() or Path(str(token_path) + ".enc").exists()
 
         is_active = (p.name == active_prof_name) if active_prof_name else False
 

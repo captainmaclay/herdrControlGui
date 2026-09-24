@@ -206,6 +206,12 @@ class HerdrConfigApp(tk.Tk):
             self._init_tray()
 
         # Enforcement: 99% времени в зашифрованом состоянии при старте.
+        if backup_manager.load_backup_password():
+            try:
+                with token_vault_manager.auto_unlock_context():
+                    pass # metadata is automatically updated inside context
+            except Exception:
+                pass
         token_vault_manager.ensure_locked()
 
         # Первоначальная загрузка данных
@@ -1344,8 +1350,49 @@ class HerdrConfigApp(tk.Tk):
         except Exception:
             pass
 
+    def _check_and_update_vault_meta(self):
+        """Проверяет, нужно ли фоново обновить метаданные заблокированных токенов."""
+        import time
+        import token_vault_manager
+        import backup_manager
+        pw = backup_manager.load_backup_password()
+        if not pw or not token_vault_manager.is_vault_locked():
+            return
+            
+        now = time.time()
+        if now - token_vault_manager.LAST_GLOBAL_METADATA_UPDATE < 60:
+            return
+            
+        needs_update = False
+        
+        # Check Gemini
+        for p in getattr(self, 'gemini_profiles', []):
+            if p.get("is_locked") and (p.get("is_expired") or "Отсутствует" in p.get("email", "")):
+                needs_update = True
+                break
+                
+        # Check Claude
+        for cp in getattr(self, 'claude_profiles', []):
+            if cp.get("is_locked") and cp.get("is_expired"):
+                needs_update = True
+                break
+                
+        st = getattr(self, "claude_active_status", {})
+        if st and st.get("is_locked") and st.get("is_expired"):
+            needs_update = True
+
+        if needs_update:
+            try:
+                with token_vault_manager.auto_unlock_context():
+                    pass # Metadata updates automatically inside context hook
+                self.load_gemini_profiles_data()
+                self.load_claude_profiles_data()
+            except Exception:
+                pass
+
     def render_gemini_page(self):
         """Отрисовка карточек аккаунтов Gemini."""
+        self._check_and_update_vault_meta()
         # 1. Обновляем карточку текущего активного аккаунта
         active_prof = next((p for p in self.gemini_profiles if p.get("is_active")), None)
         if active_prof:
@@ -1757,6 +1804,12 @@ class HerdrConfigApp(tk.Tk):
     def refresh_gemini_profiles_async(self):
         """Обновление списка профилей."""
         def worker():
+            try:
+                import token_vault_manager
+                with token_vault_manager.auto_unlock_context():
+                    pass # Принудительно разблокируем и обновляем метаданные
+            except Exception:
+                pass
             self.load_gemini_profiles_data()
             self.after(0, self.render_gemini_page)
 
@@ -1873,6 +1926,12 @@ class HerdrConfigApp(tk.Tk):
 
     def refresh_claude_profiles_async(self):
         def worker():
+            try:
+                import token_vault_manager
+                with token_vault_manager.auto_unlock_context():
+                    pass # Принудительно разблокируем и обновляем метаданные
+            except Exception:
+                pass
             self.load_claude_profiles_data()
             self.after(0, self.render_claude_oauth_page)
 
@@ -1880,6 +1939,7 @@ class HerdrConfigApp(tk.Tk):
 
     def render_claude_oauth_page(self):
         """Отрисовка вкладки Claude OAuth."""
+        self._check_and_update_vault_meta()
         px = claude_oauth_manager.get_claude_oauth_proxy()
         online = getattr(self, "claude_proxy_online", False)
         self.claude_oauth_proxy_lbl.config(
@@ -3162,24 +3222,38 @@ class HerdrConfigApp(tk.Tk):
             self.lbl_integ_overall.config(text="PARTIAL", bg=C["yellow"], fg="#11111b")
 
     def on_integrations_sync_claude_click(self):
-        """Синхронизация Claude Code."""
+        """Диагностика Claude Code."""
         if getattr(self, "_integ_task_running", False):
             return
         self._integ_task_running = True
-        self.btn_integ_sync_claude.config(state="disabled", text="⏳ Синхронизация...")
-        self.lbl_integ_overall.config(text="SYNCING CLAUDE...", bg=C["accent_peach"], fg="#11111b")
+        self.btn_integ_sync_claude.config(state="disabled", text="⏳ Диагностика...")
+        self.lbl_integ_overall.config(text="CLAUDE DIAGNOSTICS...", bg=C["accent_peach"], fg="#11111b")
 
         def worker():
             try:
                 res = integrations_manager.sync_claude()
             except Exception as e:
-                integrations_manager.logger.log(f"Критическая ошибка синхронизации Claude: {e}", "ERROR")
+                integrations_manager.logger.log(f"Критическая ошибка Claude: {e}", "ERROR")
                 res = {"success": False, "error": str(e)}
 
             def done():
                 self._integ_task_running = False
                 self.btn_integ_sync_claude.config(state="normal", text=t("btn_sync_claude"))
                 self.on_integrations_status_click()
+                
+                # Показываем таблицу
+                if res.get("success"):
+                    msg = "ОТЧЕТ ПО СТАТУСУ CLAUDE CODE\n"
+                    msg += "-"*40 + "\n"
+                    msg += f"Токен Claude (OAuth): {'АВТОРИЗОВАН' if res.get('auth') else 'ОТСУТСТВУЕТ'}\n"
+                    msg += f"Сокет Claude SOCKS5 (1015): {'ONLINE' if res.get('socks') else 'OFFLINE'}\n"
+                    msg += f"Связь с AionUi WebUI: {'ONLINE' if res.get('aion') else 'OFFLINE'}\n"
+                    msg += "-"*40 + "\n"
+                    msg += "ПРИМЕЧАНИЕ:\nДля активной привязки/настройки системы вызовите ИИ Агента (см. SKILLS.md)."
+                    messagebox.showinfo("Диагностика Claude", msg)
+                else:
+                    messagebox.showwarning("Внимание", "Не удалось завершить диагностику. Подробности в логе.")
+
             try:
                 if not getattr(self, "_closing", False):
                     self.after(0, done)
@@ -3189,24 +3263,43 @@ class HerdrConfigApp(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def on_integrations_sync_gemini_click(self):
-        """Синхронизация Gemini Farm."""
+        """Диагностика Gemini Farm."""
         if getattr(self, "_integ_task_running", False):
             return
         self._integ_task_running = True
-        self.btn_integ_sync_gemini.config(state="disabled", text="⏳ Синхронизация...")
-        self.lbl_integ_overall.config(text="SYNCING GEMINI...", bg=C["accent_mauve"], fg="#11111b")
+        self.btn_integ_sync_gemini.config(state="disabled", text="⏳ Диагностика...")
+        self.lbl_integ_overall.config(text="GEMINI DIAGNOSTICS...", bg=C["accent_mauve"], fg="#11111b")
 
         def worker():
             try:
                 res = integrations_manager.sync_gemini()
             except Exception as e:
-                integrations_manager.logger.log(f"Критическая ошибка синхронизации Gemini: {e}", "ERROR")
+                integrations_manager.logger.log(f"Критическая ошибка Gemini: {e}", "ERROR")
                 res = {"success": False, "error": str(e)}
 
             def done():
                 self._integ_task_running = False
                 self.btn_integ_sync_gemini.config(state="normal", text=t("btn_sync_gemini"))
                 self.on_integrations_status_click()
+                
+                if res.get("success"):
+                    msg = "СВОДНАЯ ТАБЛИЦА GEMINI FARM\n"
+                    msg += "-"*40 + "\n"
+                    msg += f"Шлюз OmniRoute (20128): {'ONLINE' if res.get('omni_ok') else 'OFFLINE'}\n\n"
+                    msg += "ПРОФИЛИ В СИСТЕМЕ HERDR:\n"
+                    profs = res.get("profiles", [])
+                    if profs:
+                        for p in profs:
+                            state = "🟢 Слушает" if p.get("alive") else "🔴 Офлайн"
+                            msg += f"{p['name']} -> SOCKS {p['port']} [{state}]\n"
+                    else:
+                        msg += "Профили не найдены.\n"
+                    msg += "-"*40 + "\n"
+                    msg += "ПРИМЕЧАНИЕ:\nАктивная конфигурация маршрутизаторов делегирована ИИ-Агентам (см. SKILLS.md)."
+                    messagebox.showinfo("Диагностика Gemini Farm", msg)
+                else:
+                    messagebox.showwarning("Внимание", "Не удалось завершить диагностику. Подробности в логе.")
+
             try:
                 if not getattr(self, "_closing", False):
                     self.after(0, done)
@@ -3247,11 +3340,15 @@ class HerdrConfigApp(tk.Tk):
         card_wrap.configure(highlightbackground=C["border"], highlightthickness=1)
         card_wrap.pack(fill="both", expand=True, padx=16, pady=(0, 14))
 
+        scrollbar = tk.Scrollbar(card_wrap)
+        scrollbar.pack(side="right", fill="y")
+        
         tv = tk.Text(
-            card_wrap, bg=C["card_inner"], fg=C["text"], fill="both",
+            card_wrap, bg=C["card_inner"], fg=C["fg"], yscrollcommand=scrollbar.set,
             font=FONT_MONO, bd=0, padx=8, pady=8, state="normal"
         )
-        tv.pack(fill="both", expand=True, padx=2, pady=2)
+        tv.pack(side="left", fill="both", expand=True, padx=2, pady=2)
+        scrollbar.config(command=tv.yview)
 
         if extended_logger.EXTENDED_LOG_FILE.exists():
             try:
