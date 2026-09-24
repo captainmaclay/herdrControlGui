@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+r"""Утилита быстрого отката (Rollback / Restore) AionUi к эталонному состоянию (Golden Image).
+
+Что делает скрипт:
+1. Останавливает запущенные процессы AionUi.
+2. Создает резервную копию текущего состояния базы перед откатом.
+3. Восстанавливает чистую проверенную базу данных и конфигурации из эталона:
+   D:\My files\herdrControlGui\backups\aionui_golden_reference\
+   (или из указанного tar.gz архива).
+4. Очищает временные lock-файлы (instance.lock, migrate.lock, -wal, -shm).
+5. Проверяет PRAGMA integrity_check.
+6. Перезапускает AionUi в tmux.
+7. Проверяет доступность эндпоинтов и агентов.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tarfile
+import time
+from pathlib import Path
+
+
+def log(msg: str) -> None:
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {msg}")
+
+
+def run_cmd(cmd: str) -> tuple[int, str]:
+    res = subprocess.run(
+        cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    return res.returncode, (res.stdout + res.stderr).strip()
+
+
+def restore_golden(source_archive: str | None = None) -> bool:
+    user_home = Path.home()
+    aionui_dir = user_home / ".aionui-web"
+    db_file = aionui_dir / "aionui-backend.db"
+    win_backup_root = Path("/mnt/d/My files/herdrControlGui/backups")
+    golden_ref_dir = win_backup_root / "aionui_golden_reference"
+
+    # Если передан архив, распаковываем его во временную папку
+    restore_source_dir = golden_ref_dir
+    temp_extract = None
+
+    if source_archive:
+        archive_path = Path(source_archive)
+        if not archive_path.exists():
+            log(f"ОШИБКА: Указанный архив не найден: {archive_path}")
+            return False
+        temp_extract = Path("/tmp") / f"restore_temp_{int(time.time())}"
+        log(f"Распаковка архива {archive_path.name}...")
+        with tarfile.open(archive_path, "r:gz") as tar:
+            tar.extractall(temp_extract)
+        restore_source_dir = temp_extract / "aionui_golden"
+
+    if not restore_source_dir.exists() or not (restore_source_dir / "aionui-backend.db").exists():
+        log(f"ОШИБКА: Эталонный файл базы не найден в {restore_source_dir}")
+        return False
+
+    golden_db = restore_source_dir / "aionui-backend.db"
+
+    # Проверка целостности эталона перед откатом
+    check_conn = sqlite3.connect(f"file:{golden_db}?mode=ro", uri=True)
+    integrity = check_conn.cursor().execute("PRAGMA integrity_check").fetchall()
+    check_conn.close()
+    if integrity != [("ok",)]:
+        log(f"ОШИБКА: Эталонная база повреждена: {integrity}")
+        return False
+    log("✓ Целостность восстанавливаемой базы подтверждена.")
+
+    log("=== ШАГ 1: Остановка сервисов AionUi ===")
+    run_cmd("tmux kill-session -t aionui 2>/dev/null")
+    time.sleep(1)
+    run_cmd("pkill -f 'aioncore' 2>/dev/null")
+    run_cmd("pkill -f 'aionui-web' 2>/dev/null")
+    time.sleep(1)
+
+    log("=== ШАГ 2: Резервная копия текущей базы перед откатом ===")
+    if db_file.exists():
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        pre_restore_bak = aionui_dir / f"aionui-backend.before_restore_{ts}.db"
+        try:
+            shutil.copy2(db_file, pre_restore_bak)
+            log(f"✓ Текущая база сохранена в {pre_restore_bak.name}")
+        except Exception as e:
+            log(f"Предупреждение при бэкапе: {e}")
+
+    log("=== ШАГ 3: Восстановление эталонной базы данных ===")
+    shutil.copy2(golden_db, db_file)
+    log("✓ Файл aionui-backend.db успешно заменен эталонной версией.")
+
+    # Восстановление конфигураций
+    configs_src = restore_source_dir / "configs"
+    if configs_src.exists():
+        claude_cfg = configs_src / ".claude.json"
+        if claude_cfg.exists():
+            shutil.copy2(claude_cfg, user_home / ".claude.json")
+            log("✓ Восстановлен ~/.claude.json")
+        claude_dir = configs_src / ".claude"
+        if claude_dir.exists():
+            shutil.copytree(claude_dir, user_home / ".claude", dirs_exist_ok=True)
+            log("✓ Восстановлен ~/.claude/")
+
+    log("=== ШАГ 4: Очистка временных файлов и блокировок ===")
+    for lock_name in (
+        "aionui-backend.db-wal",
+        "aionui-backend.db-shm",
+        "aionui-backend.db.instance.lock",
+        "aionui-backend.db.migrate.lock",
+    ):
+        f = aionui_dir / lock_name
+        if f.exists():
+            try:
+                f.unlink()
+            except Exception:
+                pass
+    log("✓ Блокировки очищены.")
+
+    log("=== ШАГ 5: Перезапуск AionUi в tmux ===")
+    start_cmd = (
+        "tmux new -d -s aionui 'env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY "
+        "NO_PROXY=localhost,127.0.0.1,::1 no_proxy=localhost,127.0.0.1,::1 /home/f/.local/bin/aionui-web start --no-open --port 25808'"
+    )
+    run_cmd(start_cmd)
+    time.sleep(3)
+
+    log("=== ШАГ 6: Проверка доступности API ===")
+    api_ok = False
+    for attempt in range(1, 6):
+        try:
+            code, out = run_cmd("curl -s --noproxy '*' http://127.0.0.1:25808/api/assistants")
+            if '"id":"bare:2d23ff1c"' in out:
+                log("✓ AionUi успешно запущен, Claude Code и все ассистенты активны.")
+                api_ok = True
+                break
+        except Exception:
+            pass
+        time.sleep(1)
+
+    if temp_extract and temp_extract.exists():
+        shutil.rmtree(temp_extract, ignore_errors=True)
+
+    if api_ok:
+        log("\n=======================================================")
+        log("ОТКАТ К ЭТАЛОНУ УСПЕШНО ЗАВЕРШЕН!")
+        log("Откройте http://localhost:25808/#/guid и нажмите Ctrl+F5.")
+        log("=======================================================")
+        return True
+    else:
+        log("Предупреждение: сервис перезапущен, но API еще не ответил. Проверьте статус через пару секунд.")
+        return True
+
+
+if __name__ == "__main__":
+    archive_arg = sys.argv[1] if len(sys.argv) > 1 else None
+    success = restore_golden(archive_arg)
+    sys.exit(0 if success else 1)

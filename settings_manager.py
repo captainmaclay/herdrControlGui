@@ -39,6 +39,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "claude_proxy_host": "127.0.0.1", # Хост прокси для Claude Code
     "claude_proxy_port": 1015,        # Порт прокси для Claude Code (по умолчанию 1015 System Proxy)
     "claude_killswitch": True,        # Killswitch для Claude (по умолчанию включен)
+    "claude_node_isolate": True,      # Изоляция Node.js/claude.exe в брандмауэре (Windows)
     "port_check_interval_seconds": 2.0, # Интервал быстрой проверки доступности портов и Killswitch (сек)
 }
 
@@ -155,7 +156,12 @@ def get_claude_killswitch() -> bool:
     return bool(get_setting("claude_killswitch", DEFAULT_SETTINGS["claude_killswitch"]))
 
 
-def set_claude_proxy_settings(host: str, port: int, killswitch: bool) -> None:
+def get_claude_node_isolate() -> bool:
+    """Возвращает статус флага жесткой изоляции Node.js (брандмауэр Windows)."""
+    return bool(get_setting("claude_node_isolate", DEFAULT_SETTINGS["claude_node_isolate"]))
+
+
+def set_claude_proxy_settings(host: str, port: int, killswitch: bool, node_isolate: bool = False) -> None:
     """Сохраняет настройки прокси и Killswitch для Claude Code в settings.json."""
     s = load_settings()
     s["claude_proxy_host"] = str(host).strip() or "127.0.0.1"
@@ -164,6 +170,7 @@ def set_claude_proxy_settings(host: str, port: int, killswitch: bool) -> None:
     except (ValueError, TypeError):
         s["claude_proxy_port"] = 1015
     s["claude_killswitch"] = bool(killswitch)
+    s["claude_node_isolate"] = bool(node_isolate)
     save_settings(s)
 
 
