@@ -9,21 +9,24 @@ import claude_oauth_manager
 MAGIC_HEADER_TOKEN = b"HRDRTK01"
 
 def _get_token_paths() -> list[Path]:
-    """Возвращает список всех потенциальных путей к токенам (Claude и Gemini)."""
+    """Возвращает список всех потенциальных путей к токенам (Claude и Gemini),
+    ИСКЛЮЧАЯ активные аккаунты, чтобы они всегда оставались расшифрованными."""
     paths = []
-    
-    # Claude tokens
-    if backup_manager.WSL_CLAUDE_DIR.exists():
-        paths.append(backup_manager.WSL_CLAUDE_DIR / ".credentials.json")
-        paths.append(backup_manager.WSL_CLAUDE_DIR / "config.json")
-        
-    # Gemini tokens
+
+    # Claude tokens (Только из профилей OAuth - Vault)
+    base_claude = backup_manager.WSL_CLAUDE_DIR
+    if base_claude.exists():
+        profiles_dir = base_claude / "oauth-profiles"
+        if profiles_dir.exists():
+            for p_name in os.listdir(profiles_dir):
+                p_dir = profiles_dir / p_name
+                if p_dir.is_dir():
+                    pt = p_dir / ".credentials.json"
+                    paths.append(pt)
+
+    # Gemini tokens (Только из профилей - Vault)
     base_gemini = backup_manager.WSL_GEMINI_DIR
     if base_gemini.exists():
-        cli_token = base_gemini / "antigravity-cli" / "antigravity-oauth-token"
-        if cli_token.exists() or Path(str(cli_token) + ".enc").exists():
-            paths.append(cli_token)
-            
         profiles_dir = base_gemini / "profiles"
         if profiles_dir.exists():
             for p_name in os.listdir(profiles_dir):
@@ -31,7 +34,7 @@ def _get_token_paths() -> list[Path]:
                 if p_dir.is_dir():
                     pt = p_dir / "antigravity-oauth-token"
                     paths.append(pt)
-                    
+
     return paths
 
 def is_vault_locked() -> bool:
@@ -93,6 +96,10 @@ def lock_tokens(password: str) -> tuple[bool, str]:
         return False, f"Ошибка при блокировке: {e}"
 
 def unlock_tokens(password: str) -> tuple[bool, str]:
+    try:
+        register_vault_interaction()
+    except Exception:
+        pass
     if not password:
         return False, "Пароль не может быть пустым."
         
@@ -148,6 +155,11 @@ def update_all_metadata():
     """Обновляет кеш метаданных с открытых токенов и сбрасывает таймер."""
     global LAST_GLOBAL_METADATA_UPDATE
     paths = _get_token_paths()
+    if backup_manager.WSL_CLAUDE_DIR.exists():
+        paths.append(backup_manager.WSL_CLAUDE_DIR / ".credentials.json")
+    if backup_manager.WSL_GEMINI_DIR.exists():
+        paths.append(backup_manager.WSL_GEMINI_DIR / "antigravity-cli" / "antigravity-oauth-token")
+
     for p in paths:
         if p.exists():
             if ".gemini" in str(p):
@@ -180,6 +192,34 @@ def ensure_locked():
     pw = backup_manager.load_backup_password()
     if pw and not is_vault_locked():
         lock_tokens(pw)
+
+import threading
+
+_vault_watchdog_thread = None
+_vault_stop_event = threading.Event()
+_last_interaction_time = time.time()
+VAULT_AUTO_LOCK_TIMEOUT = 10.0
+
+def register_vault_interaction():
+    global _last_interaction_time
+    _last_interaction_time = time.time()
+
+def _vault_watchdog_loop():
+    while not _vault_stop_event.is_set():
+        _vault_stop_event.wait(5.0)
+        if time.time() - _last_interaction_time >= VAULT_AUTO_LOCK_TIMEOUT:
+            if not is_vault_locked():
+                pw = backup_manager.load_backup_password()
+                if pw:
+                    lock_tokens(pw)
+
+def start_vault_watchdog():
+    global _vault_watchdog_thread
+    if _vault_watchdog_thread is None or not _vault_watchdog_thread.is_alive():
+        _vault_stop_event.clear()
+        register_vault_interaction()
+        _vault_watchdog_thread = threading.Thread(target=_vault_watchdog_loop, daemon=True)
+        _vault_watchdog_thread.start()
 
 if __name__ == "__main__":
     import argparse

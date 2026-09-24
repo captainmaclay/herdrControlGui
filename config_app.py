@@ -58,6 +58,7 @@ import settings_manager
 import strategy_manager
 import backup_manager
 import claude_manager
+import node_isolate_manager
 import claude_oauth_manager
 import integrations_manager
 import token_vault_manager
@@ -108,7 +109,7 @@ FONT_SUB = ("Segoe UI", 8)
 FONT_MONO = ("Consolas", 9)
 FONT_MONO_BOLD = ("Consolas", 9, "bold")
 
-SINGLE_INSTANCE_PORT = 38123
+SINGLE_INSTANCE_PORT = 38124
 
 
 def make_tray_icon(color: str = "blue"):
@@ -282,6 +283,16 @@ class HerdrConfigApp(tk.Tk):
         self.after(300, self.refresh_routes_async)
 
         # Периодическое полное обновление маршрутов (каждые 15 секунд)
+        self.node_isolate_thread = node_isolate_manager.NodeIsolateThread(
+            lambda: (
+                settings_manager.get_claude_proxy_host(),
+                settings_manager.get_claude_proxy_port(),
+                settings_manager.get_claude_node_isolate()
+            )
+        )
+        self.node_isolate_thread.start()
+
+        token_vault_manager.start_vault_watchdog()
         self._schedule_auto_refresh()
 
         # На передний план
@@ -772,6 +783,18 @@ class HerdrConfigApp(tk.Tk):
         )
         self.claude_ks_cb.pack(anchor="w", pady=(4, 2))
 
+        # Чекбокс Изоляции Node.js
+        self.claude_node_isolate_var = tk.BooleanVar(value=settings_manager.get_claude_node_isolate())
+        self.claude_ni_cb = tk.Checkbutton(
+            cfg_in, text="Isolate - Node.js and claude.exe",
+            variable=self.claude_node_isolate_var,
+            font=FONT_BOLD, fg=C["accent_peach"] if self.claude_node_isolate_var.get() else C["subtext"],
+            bg=C["card_inner"], activebackground=C["card_inner"],
+            activeforeground=C["fg"], selectcolor=C["input_bg"],
+            cursor="hand2", command=self._on_claude_node_isolate_toggle
+        )
+        self.claude_ni_cb.pack(anchor="w", pady=(0, 10))
+
         # Детали маршрута
         details_frame = tk.Frame(pad, bg=C["card_inner"], bd=1, relief="solid")
         details_frame.configure(highlightbackground=C["border"], highlightthickness=1)
@@ -856,22 +879,36 @@ class HerdrConfigApp(tk.Tk):
     def _on_claude_killswitch_toggle(self):
         self._save_claude_settings_action()
 
-    def _save_claude_settings_action(self):
-        h = self.claude_host_var.get().strip() or "127.0.0.1"
+    def _on_claude_node_isolate_toggle(self):
+        self._save_claude_settings_action()
+        import node_isolate_manager
+        import settings_manager
+        h = settings_manager.get_claude_proxy_host()
+        p = settings_manager.get_claude_proxy_port()
+        is_on = settings_manager.get_claude_node_isolate()
+        # Force immediate apply so to avoid 20 sec waiting rule
         try:
-            p = int(self.claude_port_var.get().strip())
-        except ValueError:
-            messagebox.showerror(t("error_title"), "Порт должен быть целым числом!")
+            node_isolate_manager.enforce_isolation(h, p, is_on)
+        except Exception as e:
+            import traceback, logging
+            logging.error(f"SILENT CRASH IN ENFORCE_ISOLATION: {e}\n{traceback.format_exc()}")
+
             return
         ks = bool(self.claude_killswitch_var.get())
+        ni = getattr(self, "claude_node_isolate_var", None)
+        ni_val = bool(ni.get()) if ni else False
         self._last_claude_accessible = None
+        settings_manager.set_claude_proxy_settings(h, p, ks, ni_val)
         claude_manager.save_claude_config(h, p, ks)
         proxy_manager.set_proxy_claude_flag(p, True)
         self.proxies = proxy_manager.load_proxies()
         self.claude_route_lbl.config(text=f"http://{h}:{10000 + p} (SOCKS5 :{p})")
         if hasattr(self, "claude_ks_cb"):
             self.claude_ks_cb.config(fg=C["red"] if ks else C["subtext"])
+        if hasattr(self, "claude_ni_cb"):
+            self.claude_ni_cb.config(fg=C["accent_peach"] if ni_val else C["subtext"])
         self.refresh_routes_async()
+
 
     # =========================================================================
     # СТРАНИЦА 2: SOCKS5 ПРОКСИ
@@ -3847,11 +3884,7 @@ class HerdrConfigApp(tk.Tk):
             if not self.tray_icon:
                 self._init_tray()
             self.withdraw()
-            try:
-                if self.tray_icon:
-                    self.tray_icon.notify(t("tray_minimized_msg"), t("app_name"))
-            except Exception:
-                pass
+
         else:
             self.destroy()
 

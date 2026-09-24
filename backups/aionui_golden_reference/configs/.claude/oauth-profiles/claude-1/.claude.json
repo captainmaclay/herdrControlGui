@@ -1,0 +1,61 @@
+{
+  "firstStartTime": "2026-09-24T10:23:27.639Z",
+  "firstStartVersion": "2.1.280",
+  "machineID": "eb7914305f0b8c69db78cb332f529da308f5d2f3ef9c10e49321dc3f983c4bd2",
+  "opusProMigrationComplete": true,
+  "sonnet1m45MigrationComplete": true,
+  "seenNotifications": {},
+  "hasResetAutoModeOptInForDefaultOffer": true,
+  "migrationVersion": 14,
+  "userID": "a7c25f3f078df27d496616e941f53833c961a652cceea93eb57183317c3c5c9f",
+  "oauthAccount": {
+    "accountUuid": "7d350749-9368-4a11-9d00-d3fef752afb7",
+    "emailAddress": "ligneoussarcoid@outlook.com",
+    "organizationUuid": "9855d734-7531-47ab-bac1-55f03a107f3b",
+    "hasExtraUsageEnabled": false,
+    "billingType": "apple_subscription",
+    "accountCreatedAt": "2026-09-24T10:17:56.580241Z",
+    "subscriptionCreatedAt": "2026-09-24T10:22:56.938298Z",
+    "ccOnboardingFlags": {},
+    "claudeCodeTrialEndsAt": null,
+    "claudeCodeTrialDurationDays": null,
+    "seatTier": null,
+    "displayName": "Pinny Finny",
+    "fullName": "Pinny Finny",
+    "profileFetchedAt": 1790245476423,
+    "organizationRole": "admin",
+    "workspaceRole": null,
+    "organizationName": "ligneoussarcoid@outlook.com's Organization",
+    "organizationType": "claude_pro",
+    "organizationRateLimitTier": "default_claude_ai",
+    "userRateLimitTier": null
+  },
+  "claudeCodeFirstTokenDate": "2026-09-24T10:24:35.837634Z",
+  "clientDataCacheSlots": {
+    "bi1-234a4d2fb46c00be": {
+      "data": {
+        "cedar_lagoon": {
+          "claude-fable": true,
+          "claude-mythos": true
+        },
+        "cedar_basin": "2027-08-31"
+      },
+      "at": 1790245477952,
+      "entrypoint": "cli",
+      "model": "claude-opus-5-5",
+      "org": "9855d734-7531-47ab-bac1-55f03a107f3b"
+    }
+  },
+  "additionalModelOptionsCache": [
+    {
+      "value": "claude-fable-5-1[1m]",
+      "label": "Fable",
+      "description": "Fable 5.1 · Most capable for your hardest and longest-running tasks"
+    }
+  ],
+  "additionalModelOptionsAnsweredAt": 1790245477952,
+  "additionalModelCostsCache": {},
+  "modelAccessCache": [],
+  "orgModelDefaultCache": null,
+  "autoCompactWindowsCache": null
+}

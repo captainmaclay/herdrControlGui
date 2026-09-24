@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "^(startup|resume|clear|compact|fork)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '/home/f/.claude/hooks/herdr-agent-state.sh' session",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "skipDangerousModePermissionPrompt": true,
+  "theme": "dark",
+  "model": "claude-opus-5-5",
+  "env": {
+    "HTTPS_PROXY": "http://127.0.0.1:11015",
+    "HTTP_PROXY": "http://127.0.0.1:11015",
+    "ALL_PROXY": "socks5h://127.0.0.1:1015",
+    "DISABLE_AUTOUPDATER": "1"
+  },
+  "permissions": {
+    "additionalDirectories": [
+      "/mnt/c/Users/f/OneDrive/Autosync/Prompts"
+    ]
+  }
+}

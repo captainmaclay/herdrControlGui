@@ -28,6 +28,7 @@ import requests
 
 import claude_manager
 import settings_manager
+import token_vault_manager
 
 WSL_DISTRO = os.environ.get("WSL_DISTRO", "Ubuntu")
 WSL_USER = (os.environ.get("WSL_USER") or os.environ.get("USERNAME") or "default").strip()
@@ -209,7 +210,15 @@ def _profile_account(profile_dir: Path) -> dict[str, Any]:
 def _is_same_account(profile_dir: Path, active_acc: dict[str, Any], active_cred: dict[str, Any]) -> bool:
     acc = _profile_account(profile_dir)
     if acc.get("accountUuid") and active_acc.get("accountUuid"):
-        return acc["accountUuid"] == active_acc["accountUuid"]
+        # Надежное сравнение по UUID
+        if acc["accountUuid"] == active_acc["accountUuid"]:
+            return True
+    elif acc.get("emailAddress") and active_acc.get("emailAddress"):
+        # Фолбэк на email, если UUID нет (бывает при старых импортах или новой версии CLI)
+        if acc["emailAddress"].lower() == active_acc["emailAddress"].lower():
+            return True
+    
+    # Фолбэк на токены (ненадежно при ротации, но лучше чем ничего)
     prof_cred = get_credentials_info(profile_dir / CREDENTIALS_NAME)
     return bool(prof_cred.get("refresh_token")) and prof_cred.get("refresh_token") == active_cred.get("refresh_token")
 
@@ -245,10 +254,11 @@ def sync_active_back_to_profile() -> str | None:
     if not prof or not ACTIVE_CREDENTIALS_FILE.exists():
         return None
     try:
-        active_raw = ACTIVE_CREDENTIALS_FILE.read_bytes()
-        target = prof / CREDENTIALS_NAME
-        if not target.exists() or target.read_bytes() != active_raw:
-            target.write_bytes(active_raw)
+        with token_vault_manager.auto_unlock_context():
+            active_raw = ACTIVE_CREDENTIALS_FILE.read_bytes()
+            target = prof / CREDENTIALS_NAME
+            if not target.exists() or target.read_bytes() != active_raw:
+                target.write_bytes(active_raw)
         return prof.name
     except Exception:
         return None
@@ -329,38 +339,53 @@ def save_active_as_profile(profile_name: str) -> tuple[bool, str]:
         return False, f"Ошибка сохранения профиля: {e}"
 
 
+def _fix_wsl_permissions() -> None:
+    """Восстанавливает 0600 права на credentials.json в WSL, иначе AionUi / claude.js их отбросит."""
+    try:
+        import subprocess
+        CREATE_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
+        subprocess.run([
+            "wsl.exe", "-d", WSL_DISTRO, "-u", WSL_USER,
+            "chmod", "600", f"/home/{WSL_USER}/.claude/.credentials.json"
+        ], creationflags=CREATE_NO_WINDOW)
+    except Exception:
+        pass
+
+
 def switch_profile(profile_name: str) -> tuple[bool, str]:
     """Делает профиль активным аккаунтом Claude Code (~/.claude/.credentials.json)."""
-    src_dir = PROFILES_DIR / profile_name
-    src_cred = src_dir / CREDENTIALS_NAME
-    if not src_cred.exists():
-        return False, f"В профиле '{profile_name}' нет токена. Сначала выполните вход."
+    with token_vault_manager.auto_unlock_context():
+        src_dir = PROFILES_DIR / profile_name
+        src_cred = src_dir / CREDENTIALS_NAME
+        if not src_cred.exists():
+            return False, f"В профиле '{profile_name}' нет токена. Сначала выполните вход."
 
-    info = get_credentials_info(src_cred)
-    if info.get("is_expired"):
-        return False, f"Токены профиля '{profile_name}' истекли. Выполните вход заново."
+        info = get_credentials_info(src_cred)
+        if info.get("is_expired"):
+            return False, f"Токены профиля '{profile_name}' истекли. Выполните вход заново."
 
-    # Сохраняем свежие токены текущего аккаунта, прежде чем перезаписать их
-    sync_active_back_to_profile()
+        # Сохраняем свежие токены текущего аккаунта, прежде чем перезаписать их
+        sync_active_back_to_profile()
 
-    try:
-        CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
-        if ACTIVE_CREDENTIALS_FILE.exists():
-            shutil.copy2(ACTIVE_CREDENTIALS_FILE, CLAUDE_DIR / ".credentials.json.bak_herdr")
-        shutil.copy2(src_cred, ACTIVE_CREDENTIALS_FILE)
+        try:
+            CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
+            if ACTIVE_CREDENTIALS_FILE.exists():
+                shutil.copy2(ACTIVE_CREDENTIALS_FILE, CLAUDE_DIR / ".credentials.json.bak_herdr")
+            shutil.copy2(src_cred, ACTIVE_CREDENTIALS_FILE)
 
-        acc = _profile_account(src_dir)
-        if acc and ACTIVE_CLAUDE_JSON.exists():
-            data = _read_json(ACTIVE_CLAUDE_JSON)
-            if data:
+            _fix_wsl_permissions()
+
+            acc = _profile_account(src_dir)
+            if acc:
+                data = _read_json(ACTIVE_CLAUDE_JSON) if ACTIVE_CLAUDE_JSON.exists() else {}
                 data["oauthAccount"] = acc
                 _write_json(ACTIVE_CLAUDE_JSON, data)
-    except Exception as e:
-        return False, f"Ошибка переключения: {e}"
+        except Exception as e:
+            return False, f"Ошибка переключения: {e}"
 
-    email = _profile_account(src_dir).get("emailAddress") or profile_name
-    px = get_claude_oauth_proxy()
-    return True, f"Активный аккаунт Claude: {email}\nТрафик через Anthropic Claude Proxy :{px['port']}"
+        email = _profile_account(src_dir).get("emailAddress") or profile_name
+        px = get_claude_oauth_proxy()
+        return True, f"Активный аккаунт Claude: {email}\nТрафик через Anthropic Claude Proxy :{px['port']}"
 
 
 def delete_profile(profile_name: str) -> tuple[bool, str]:

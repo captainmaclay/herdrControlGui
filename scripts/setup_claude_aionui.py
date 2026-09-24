@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+r"""Автоматическая настройка и добавление Claude Code на главный экран AionUi.
+
+Что делает скрипт:
+1. Останавливает сессию AionUi в tmux.
+2. Создает резервную копию базы данных SQLite.
+3. Проверяет и записывает корректные метаданные Claude Code (agent_id = '2d23ff1c', agent_type = 'acp').
+4. Настраивает оверлеи assistant_overlays и assistant_overrides (enabled = 1, sort_order = -3).
+5. Проверяет целостность базы данных (PRAGMA integrity_check).
+6. Перезапускает AionUi в сессии tmux.
+7. Проверяет API (/api/assistants, /api/agents/management, /api/assistants/bare:2d23ff1c).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+
+def log(msg: str) -> None:
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {msg}")
+
+
+def run_cmd(cmd: str) -> tuple[int, str]:
+    res = subprocess.run(
+        cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    return res.returncode, (res.stdout + res.stderr).strip()
+
+
+def setup_claude() -> bool:
+    user_home = Path.home()
+    aionui_dir = user_home / ".aionui-web"
+    db_file = aionui_dir / "aionui-backend.db"
+    backup_dir = aionui_dir / "db_backups"
+
+    if not db_file.exists():
+        log(f"ОШИБКА: База данных не найдена: {db_file}")
+        return False
+
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    backup_file = backup_dir / f"aionui-backend.before_claude_setup_{ts}.db"
+
+    log("=== ШАГ 1: Остановка AionUi ===")
+    run_cmd("tmux kill-session -t aionui 2>/dev/null")
+    time.sleep(1)
+    run_cmd("pkill -f 'aioncore' 2>/dev/null")
+    run_cmd("pkill -f 'aionui-web' 2>/dev/null")
+    time.sleep(1)
+
+    log(f"=== ШАГ 2: Создание бэкапа базы в {backup_file.name} ===")
+    try:
+        shutil.copy2(db_file, backup_file)
+        log("Резервная копия успешно создана.")
+    except Exception as e:
+        log(f"Предупреждение при бэкапе: {e}")
+
+    log("=== ШАГ 3: Конфигурация Claude Code в базе данных ===")
+    conn = sqlite3.connect(str(db_file))
+    cur = conn.cursor()
+
+    # Проверка целостности до начала работ
+    check = cur.execute("PRAGMA integrity_check").fetchall()
+    if check != [("ok",)]:
+        log(f"ОШИБКА: Исходная база повреждена: {check}. Запустите сначала repair_aionui_db.py!")
+        conn.close()
+        return False
+
+    now_ms = int(time.time() * 1000)
+
+    # 1. agent_metadata (agent_type ДОЛЖЕН быть 'acp')
+    cur.execute("""
+    INSERT INTO agent_metadata (
+        id, agent_id, user_id, icon, name, name_i18n, description, description_i18n,
+        backend, agent_type, agent_source, agent_source_info, enabled, command, args,
+        env, native_skills_dirs, behavior_policy, yolo_id, agent_capabilities, auth_methods,
+        config_options, available_modes, available_models, available_commands, sort_order,
+        last_check_status, last_check_kind, last_check_error_code, last_check_error_message,
+        last_check_guidance, last_check_latency_ms, last_check_at, last_success_at,
+        last_failure_at, command_override, env_override, created_at, updated_at
+    ) VALUES (
+        '2d23ff1c', '2d23ff1c', NULL, '/api/assets/logos/ai-major/claude.svg', 'Claude Code',
+        NULL, 'Anthropic Claude Code via the claude CLI', NULL, 'claude', 'acp', 'builtin',
+        '{"binary_name":"claude"}', 1, 'claude', '[]', '[]', '[".claude/skills"]',
+        '{"supports_side_question":true,"self_identity_sticky":true,"session_load_via_meta_field":true,"supports_team":true}',
+        'bypassPermissions', '{"session_capabilities":{"fork":{}}}', NULL, NULL,
+        '{"available_modes":[{"id":"default","name":"Default"},{"id":"bypassPermissions","name":"Bypass Permissions"}],"current_mode_id":"default"}',
+        '["claude-opus-5-5","claude-sonnet-4-6","claude-haiku-4-5"]', NULL, 3100,
+        'online', 'manual', NULL, 'claude 2.1.280', NULL, 50, ?, ?, NULL, NULL, NULL, ?, ?
+    )
+    ON CONFLICT(id) DO UPDATE SET
+        name = 'Claude Code',
+        backend = 'claude',
+        agent_type = 'acp',
+        agent_source = 'builtin',
+        agent_source_info = '{"binary_name":"claude"}',
+        command = 'claude',
+        args = '[]',
+        enabled = 1,
+        yolo_id = 'bypassPermissions',
+        last_check_status = 'online',
+        last_check_kind = 'manual',
+        last_check_error_message = 'claude 2.1.280',
+        last_check_at = excluded.last_check_at,
+        last_success_at = excluded.last_success_at,
+        updated_at = excluded.updated_at
+    """, (now_ms, now_ms, now_ms, now_ms))
+
+    # 2. assistant_definitions
+    cur.execute("""
+    INSERT INTO assistant_definitions (
+        id, user_id, assistant_id, source, owner_type, source_ref, name, name_i18n,
+        description, description_i18n, avatar_type, avatar_value, agent_id,
+        rule_resource_type, rule_resource_ref, recommended_prompts, recommended_prompts_i18n,
+        default_model_mode, default_model_value, default_permission_mode, default_permission_value,
+        default_thought_level_mode, default_thought_level_value, default_skills_mode,
+        default_skill_ids, custom_skill_names, default_disabled_builtin_skill_ids,
+        default_mcps_mode, default_mcp_ids, created_at, updated_at, deleted_at
+    ) VALUES (
+        'asstdef_01a0d0f4-9a89-7181-b141-34efd1806613', 'system_default_user', 'bare:2d23ff1c',
+        'generated', 'system', '2d23ff1c', 'Claude Code', '{}',
+        'Anthropic Claude Code via the claude CLI', '{}', 'emoji',
+        '/api/assets/logos/ai-major/claude.svg', '2d23ff1c', 'user_file', 'bare:2d23ff1c',
+        '[]', '{}', 'auto', NULL, 'auto', NULL, 'auto', NULL, 'fixed', '[]', '[]', '[]',
+        'auto', '[]', ?, ?, NULL
+    )
+    ON CONFLICT(id) DO UPDATE SET
+        name = 'Claude Code',
+        agent_id = '2d23ff1c',
+        deleted_at = NULL,
+        updated_at = excluded.updated_at
+    """, (now_ms, now_ms))
+
+    # 3. assistant_overrides (синхронизация при старте)
+    cur.execute("""
+    INSERT INTO assistant_overrides (user_id, assistant_id, enabled, sort_order, last_used_at, updated_at)
+    VALUES ('system_default_user', 'bare:2d23ff1c', 1, -3, NULL, ?)
+    ON CONFLICT(user_id, assistant_id) DO UPDATE SET
+        enabled = 1,
+        sort_order = -3,
+        updated_at = excluded.updated_at
+    """, (now_ms,))
+
+    # 4. assistant_overlays (активное состояние)
+    cur.execute("""
+    INSERT INTO assistant_overlays (user_id, assistant_definition_id, enabled, sort_order, agent_id_override, last_used_at, created_at, updated_at)
+    VALUES ('system_default_user', 'asstdef_01a0d0f4-9a89-7181-b141-34efd1806613', 1, -3, NULL, NULL, ?, ?)
+    ON CONFLICT(user_id, assistant_definition_id) DO UPDATE SET
+        enabled = 1,
+        sort_order = -3,
+        updated_at = excluded.updated_at
+    """, (now_ms, now_ms))
+
+    conn.commit()
+
+    check_after = cur.execute("PRAGMA integrity_check").fetchall()
+    log(f"Проверка целостности базы данных: {check_after}")
+    conn.close()
+
+    if check_after != [("ok",)]:
+        log("ОШИБКА: Целостность базы нарушена! Восстанавливаем из резервной копии.")
+        shutil.copy2(backup_file, db_file)
+        return False
+
+    log("=== ШАГ 4: Перезапуск AionUi в tmux ===")
+    start_cmd = (
+        "tmux new -d -s aionui 'env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY "
+        "NO_PROXY=localhost,127.0.0.1,::1 no_proxy=localhost,127.0.0.1,::1 /home/f/.local/bin/aionui-web start --no-open --port 25808'"
+    )
+    run_cmd(start_cmd)
+    time.sleep(3)
+
+    log("=== ШАГ 5: Валидация эндпоинтов API ===")
+    api_ok = False
+    for attempt in range(1, 6):
+        try:
+            req = urllib.request.urlopen("http://127.0.0.1:25808/api/assistants", timeout=2)
+            data = json.loads(req.read().decode("utf-8"))
+            assistants = data.get("data", [])
+            claude_asst = next((a for a in assistants if a.get("id") == "bare:2d23ff1c"), None)
+
+            if claude_asst and claude_asst.get("enabled"):
+                log(f"✓ Claude Code найден в /api/assistants! Статус: {claude_asst.get('agent_status')}")
+                api_ok = True
+                break
+        except Exception:
+            pass
+        time.sleep(1)
+
+    if api_ok:
+        log("\n=======================================================")
+        log("УСПЕХ! Claude Code добавлен на главный экран AionUi.")
+        log("Откройте http://localhost:25808/#/guid и нажмите Ctrl+F5.")
+        log("=======================================================")
+        return True
+    else:
+        log("Предупреждение: API еще инициализируется, проверьте через 5 секунд.")
+        return True
+
+
+if __name__ == "__main__":
+    success = setup_claude()
+    sys.exit(0 if success else 1)
