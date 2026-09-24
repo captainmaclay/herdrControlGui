@@ -137,6 +137,60 @@ def make_tray_icon(color: str = "blue"):
     return img
 
 
+
+def show_toast(parent, title, message, duration=10000):
+    import extended_logger
+    extended_logger.write_ext_log("TOAST", f"Creating toast: {title}")
+    extended_logger.write_ext_log("TOAST_MSG", message)
+    """Показывает всплывашку в нижнем правом углу с кнопкой копирования."""
+    import tkinter as tk
+    toast = tk.Toplevel(parent)
+    toast.overrideredirect(True)
+    toast.attributes("-topmost", True)
+    toast.configure(bg=C["card"], bd=2, relief="solid")
+    
+    # Calculate position (bottom right)
+    window_x = parent.winfo_rootx() + parent.winfo_width() - 320
+    window_y = parent.winfo_rooty() + parent.winfo_height() - 250
+    scr_w = parent.winfo_screenwidth()
+    scr_h = parent.winfo_screenheight()
+    window_x = min(max(window_x, 0), scr_w - 340)
+    window_y = min(max(window_y, 0), scr_h - 240)
+    x_str = f"+{window_x}"
+    y_str = f"+{window_y}"
+    toast.geometry(f"340x240{x_str}{y_str}")
+    extended_logger.write_ext_log("TOAST_GEOMETRY", f"340x240{x_str}{y_str}")
+
+    lbl_title = tk.Label(toast, text=title, font=FONT_BOLD, bg=C["card"], fg=C["accent_peach"])
+    lbl_title.pack(anchor="w", padx=10, pady=(10, 5))
+    
+    txt = tk.Text(toast, bg=C["card_inner"], fg=C["fg"], font=FONT_SUB, bd=0, height=7, wrap="word")
+    txt.insert("1.0", message)
+    txt.config(state="disabled")
+    txt.pack(fill="both", expand=True, padx=10, pady=5)
+    
+    btn_frame = tk.Frame(toast, bg=C["card"])
+    btn_frame.pack(fill="x", padx=10, pady=(0, 10))
+    
+    def on_copy():
+        parent.clipboard_clear()
+        parent.clipboard_append(message)
+        parent.update()
+        toast.destroy()
+        
+    tk.Button(
+        btn_frame, text="📋 Копировать", font=FONT_SUB, bg=C["accent_blue"], fg="#000",
+        command=on_copy, bd=0, cursor="hand2", padx=10
+    ).pack(side="left")
+    
+    tk.Button(
+        btn_frame, text="❌ Закрыть", font=FONT_SUB, bg=C["card_inner"], fg=C["fg"],
+        command=toast.destroy, bd=0, cursor="hand2", padx=10
+    ).pack(side="right")
+    
+    parent.after(duration, lambda: toast.destroy() if toast.winfo_exists() else None)
+
+
 class HerdrConfigApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -3250,7 +3304,7 @@ class HerdrConfigApp(tk.Tk):
                     msg += f"Связь с AionUi WebUI: {'ONLINE' if res.get('aion') else 'OFFLINE'}\n"
                     msg += "-"*40 + "\n"
                     msg += "ПРИМЕЧАНИЕ:\nДля активной привязки/настройки системы вызовите ИИ Агента (см. SKILLS.md)."
-                    messagebox.showinfo("Диагностика Claude", msg)
+                    show_toast(self, "Диагностика Claude", msg)
                 else:
                     messagebox.showwarning("Внимание", "Не удалось завершить диагностику. Подробности в логе.")
 
@@ -3261,7 +3315,6 @@ class HerdrConfigApp(tk.Tk):
                 pass
 
         threading.Thread(target=worker, daemon=True).start()
-
     def on_integrations_sync_gemini_click(self):
         """Диагностика Gemini Farm."""
         if getattr(self, "_integ_task_running", False):
@@ -3296,7 +3349,7 @@ class HerdrConfigApp(tk.Tk):
                         msg += "Профили не найдены.\n"
                     msg += "-"*40 + "\n"
                     msg += "ПРИМЕЧАНИЕ:\nАктивная конфигурация маршрутизаторов делегирована ИИ-Агентам (см. SKILLS.md)."
-                    messagebox.showinfo("Диагностика Gemini Farm", msg)
+                    show_toast(self, "Диагностика Gemini Farm", msg)
                 else:
                     messagebox.showwarning("Внимание", "Не удалось завершить диагностику. Подробности в логе.")
 

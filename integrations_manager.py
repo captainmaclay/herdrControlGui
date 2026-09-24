@@ -260,21 +260,18 @@ def sync_claude(
             _log("Пароль не установлен в .env! Невозможно разблокировать токены для синхронизации.", "ERROR")
             return {"success": False, "step": "vault_unlock", "error": "No password in .env"}
 
-    # 1. OAuth токен
     st = aionui_claude_bridge.get_oauth_status()
     if st.get("authorized"):
         _log(f"Используется текущий токен Claude ({st.get('subscription_type', '').upper()}, осталось {st.get('days_left')} дн.)", "SUCCESS")
     else:
         _log("Предупреждение: Токен Claude недействителен.", "WARN")
 
-    # 2. Сетевые настройки и SOCKS
     c_socks_ok = check_port_accessible("127.0.0.1", 1015, timeout=1.0)
     if c_socks_ok:
         _log("Claude SOCKS5 Proxy (:1015) ACTIVE и готов принимать соединения.", "SUCCESS")
     else:
         _log("Claude SOCKS5 Proxy (:1015) OFFLINE. Проверьте vless2socks.", "ERROR")
 
-    # 3. Доступность AionUi
     aion_ok, aion_code, aion_msg = check_http_status("http://127.0.0.1:25808", timeout=1.5)
     if aion_ok:
         _log(f"AionUi WebUI доступен (HTTP {aion_code}). Готов к интеграции через Skills.", "SUCCESS")
@@ -290,57 +287,6 @@ def sync_claude(
         "socks": c_socks_ok,
         "aion": aion_ok,
         "auth": st.get("authorized", False)
-    }
-        else:
-            _log("Пароль не установлен в .env! Невозможно разблокировать токены для синхронизации.", "ERROR")
-            return {"success": False, "step": "vault_unlock", "error": "No password in .env"}
-
-    # 1. OAuth токен
-    if oauth_file:
-        _log(f"Импорт нового OAuth файла: {oauth_file}", "INFO")
-        imp_res = aionui_claude_bridge.import_oauth_file(oauth_file)
-        if imp_res.get("success"):
-            _log(f"OAuth токен успешно импортирован (Подписка: {imp_res.get('subscription_type')})", "SUCCESS")
-        else:
-            _log(f"Ошибка импорта OAuth: {imp_res.get('error')}", "ERROR")
-            return {"success": False, "step": "oauth_import", "error": imp_res.get("error")}
-    else:
-        st = aionui_claude_bridge.get_oauth_status()
-        if st.get("authorized"):
-            _log(f"Используется текущий токен Claude ({st.get('subscription_type', '').upper()}, осталось {st.get('days_left')} дн.)", "SUCCESS")
-        else:
-            _log("Предупреждение: Действующий OAuth токен Claude не обнаружен в .credentials.json", "WARN")
-
-    # 2. Сетевые настройки и Killswitch
-    _log("Применение настроек прокси (:1015 / :11015) и флага Killswitch...", "INFO")
-    p_res = aionui_claude_bridge.ensure_claude_proxy_settings(port=1015, killswitch=True)
-    if p_res.get("success"):
-        _log("Файлы settings.json (Windows и WSL) успешно обновлены", "SUCCESS")
-    else:
-        _log(f"Ошибка настройки прокси: {p_res.get('error')}", "ERROR")
-
-    # 3. Патч ресурсов AionUi
-    _log("Обновление встроенного бинарника Claude в AionUi до v2.1.280...", "INFO")
-    res_patch = aionui_claude_bridge.patch_aionui_managed_resources(target_version="2.1.280")
-    if res_patch.get("success"):
-        _log("Ресурсы AionUi и manifest.json успешно пропатчены до версии 2.1.280", "SUCCESS")
-    else:
-        _log(f"Ошибка патча ресурсов AionUi: {res_patch.get('error')}", "WARN")
-
-    # 4. Регистрация в базе данных AionUi
-    _log("Регистрация команды 'claude' в базе данных AionUi (agent_metadata)...", "INFO")
-    db_patch = aionui_claude_bridge.patch_aionui_database()
-    if db_patch.get("success"):
-        _log(f"База данных AionUi обновлена (изменено строк: {db_patch.get('rows_affected')})", "SUCCESS")
-    else:
-        _log(f"Ошибка обновления базы AionUi: {db_patch.get('error')}", "WARN")
-
-    _log("=== Синхронизация Claude Code успешно завершена ===", "SUCCESS")
-    return {
-        "success": True,
-        "proxy": p_res,
-        "resources": res_patch,
-        "db": db_patch,
     }
 
 
@@ -358,7 +304,6 @@ def sync_gemini(log_fn: Callable[[str, str], None] | None = None) -> dict[str, A
         if pw:
             token_vault_manager.unlock_tokens(pw)
 
-    # 1. Профили Herdr
     profiles = gemini_manager.list_profiles()
     _log(f"Обнаружено профилей Gemini в системе Herdr: {len(profiles)}", "INFO")
 
@@ -369,7 +314,7 @@ def sync_gemini(log_fn: Callable[[str, str], None] | None = None) -> dict[str, A
         port = prof.get("port", 1082)
         alive = check_port_accessible("127.0.0.1", port, timeout=0.5)
         status_icon = "🟢" if alive else "🔴"
-        _log(f"{status_icon} Профиль Herdr '{name}' ({email}) ➔ SOCKS5 : {port} [Слушает: {alive}]", "INFO")
+        _log(f"{status_icon} Профиль Herdr '{name}' ({email}) -> SOCKS5 : {port} [Слушает: {alive}]", "INFO")
         active_conns.append({"name": name, "email": email, "port": port, "alive": alive})
 
     omni_ok, omni_code, omni_msg = check_http_status("http://127.0.0.1:20128", timeout=1.5)
@@ -385,76 +330,4 @@ def sync_gemini(log_fn: Callable[[str, str], None] | None = None) -> dict[str, A
         "success": True,
         "profiles": active_conns,
         "omni_ok": omni_ok,
-    }
-        else:
-            _log("Пароль не установлен в .env! Невозможно разблокировать токены для синхронизации.", "ERROR")
-            return {"success": False, "step": "vault_unlock", "error": "No password in .env"}
-
-    # 1. Профили
-    profiles = gemini_manager.list_profiles()
-    _log(f"Обнаружено профилей Gemini в системе: {len(profiles)}", "INFO")
-
-    active_conns = []
-    for prof in profiles:
-        name = prof.get("name", "Account")
-        email = prof.get("email", "unknown")
-        port = prof.get("port", 1082)
-        alive = check_port_accessible("127.0.0.1", port, timeout=0.5)
-        status_icon = "🟢" if alive else "🔴"
-        _log(f"{status_icon} Профиль '{name}' ({email}) ➔ SOCKS5 : {port} [Доступен: {alive}]", "INFO")
-        active_conns.append({"name": name, "email": email, "port": port, "alive": alive})
-
-    # 2. Проверка регистрации провайдера в AionUi
-    _log("Проверка регистрации кастомного провайдера gemini-farm в AionUi...", "INFO")
-    wsl_root = aionui_claude_bridge.get_wsl_rootfs_path()
-    if wsl_root:
-        db_path = wsl_root / f"home/{aionui_claude_bridge.WSL_USER}/.aionui-web/aionui-backend.db"
-        if db_path.exists():
-            try:
-                conn = sqlite3.connect(str(db_path), timeout=5)
-                cur = conn.cursor()
-                rows = cur.execute("SELECT id, name, base_url, models FROM providers WHERE models LIKE '%gemini-farm%'").fetchall()
-                if rows:
-                    _log(f"Провайдер 'gemini-farm' уже зарегистрирован в AionUi (Endpoint: {rows[0][2]})", "SUCCESS")
-                else:
-                    # Добавляем если отсутствует
-                    cur.execute("""
-                        INSERT OR REPLACE INTO providers (id, platform, name, base_url, models, enabled)
-                        VALUES ('custom_gemini_farm', 'custom', 'OmniRoute Gemini Farm', 'http://127.0.0.1:20128/v1', '["gemini-farm"]', 1)
-                    """)
-                    conn.commit()
-                    _log("Провайдер 'gemini-farm' успешно зарегистрирован в AionUi", "SUCCESS")
-                conn.close()
-            except Exception as e:
-                _log(f"Замечание по БД AionUi: {e}", "WARN")
-
-    # 3. Тест пинга к модели через OmniRoute
-    _log("Тестовый запрос к модели 'gemini-farm' через OmniRoute (:20128)...", "INFO")
-    try:
-        req_data = json.dumps({
-            "model": "gemini-farm",
-            "messages": [{"role": "user", "content": "Ping"}]
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            "http://127.0.0.1:20128/v1/chat/completions",
-            headers={
-                "Authorization": "Bearer sk-omniroute-secret",
-                "Content-Type": "application/json"
-            },
-            data=req_data
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            reply = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            _log(f"Успешный ответ от Gemini Farm: '{reply[:60]}...'", "SUCCESS")
-            ping_ok = True
-    except Exception as e:
-        _log(f"Запрос к gemini-farm завершился с замечанием: {e}", "WARN")
-        ping_ok = False
-
-    _log("=== Синхронизация Gemini Farm завершена ===", "SUCCESS")
-    return {
-        "success": True,
-        "profiles": active_conns,
-        "ping_ok": ping_ok,
     }
