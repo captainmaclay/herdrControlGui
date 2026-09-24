@@ -19,17 +19,8 @@ import os
 import subprocess
 
 def get_wsl_user(distro: str = "Ubuntu") -> str:
-    """Определяет активного пользователя WSL2."""
-    env_user = os.environ.get("WSL_USER")
-    if env_user:
-        return env_user
-    try:
-        res = subprocess.run(["wsl", "-d", distro, "whoami"], capture_output=True, text=True, timeout=2)
-        if res.returncode == 0 and res.stdout.strip():
-            return res.stdout.strip()
-    except Exception:
-        pass
-    return os.environ.get("USERNAME", "default")
+    """Определяет активного пользователя WSL2 без блокирующих вызовов сети."""
+    return (os.environ.get("WSL_USER") or os.environ.get("USERNAME") or "default").strip()
 
 
 WSL_DISTRO = os.environ.get("WSL_DISTRO", "Ubuntu")
@@ -40,12 +31,33 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "language": "en",                 # Default interface language ('en' or 'ru')
     "auto_proxy_failover": True,      # Автоподбор Proxy при сбое подключения (той же страны)
     "auto_refresh_routes": True,      # Автопроверка каждые 30 сек
+    "auto_backup_enabled": False,     # Автобэкап по умолчанию выключен
+    "backup_interval_hours": 12,      # Интервал автобэкапа
+    "backup_dir": ".",                # Папка бэкапов по умолчанию
+    "last_backup_time": "-",          # Время последнего бэкапа
+    "account_proxy_bindings": {},     # Ручные привязки аккаунтов к портам: {profile_name: {"port": int, "manual": bool}}
+    "claude_proxy_host": "127.0.0.1", # Хост прокси для Claude Code
+    "claude_proxy_port": 1015,        # Порт прокси для Claude Code (по умолчанию 1015 System Proxy)
+    "claude_killswitch": True,        # Killswitch для Claude (по умолчанию включен)
+    "port_check_interval_seconds": 2.0, # Интервал быстрой проверки доступности портов и Killswitch (сек)
 }
 
 
 def load_settings() -> dict[str, Any]:
     """Загружает настройки из settings.json."""
     if not SETTINGS_FILE.exists():
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass and (Path(meipass) / "settings.json").exists():
+            try:
+                with open(Path(meipass) / "settings.json", "r", encoding="utf-8") as mf:
+                    b_data = json.load(mf)
+                if isinstance(b_data, dict):
+                    merged = dict(DEFAULT_SETTINGS)
+                    merged.update(b_data)
+                    save_settings(merged)
+                    return merged
+            except Exception:
+                pass
         save_settings(DEFAULT_SETTINGS)
         return dict(DEFAULT_SETTINGS)
 
@@ -87,3 +99,80 @@ def set_setting(key: str, value: Any) -> None:
     s = load_settings()
     s[key] = value
     save_settings(s)
+
+
+def get_account_proxy_binding(profile_name: str) -> dict[str, Any] | None:
+    """Возвращает данные привязки прокси для профиля (port, manual)."""
+    s = load_settings()
+    bindings = s.get("account_proxy_bindings", {})
+    if isinstance(bindings, dict):
+        return bindings.get(profile_name)
+    return None
+
+
+def set_account_proxy_binding(profile_name: str, port: int, manual: bool = True) -> None:
+    """Сохраняет привязку прокси для профиля (с отметкой ручного выбора)."""
+    s = load_settings()
+    if "account_proxy_bindings" not in s or not isinstance(s["account_proxy_bindings"], dict):
+        s["account_proxy_bindings"] = {}
+    s["account_proxy_bindings"][profile_name] = {"port": int(port), "manual": bool(manual)}
+    save_settings(s)
+
+
+def clear_account_proxy_binding(profile_name: str) -> None:
+    """Удаляет привязку прокси для указанного профиля."""
+    s = load_settings()
+    bindings = s.get("account_proxy_bindings", {})
+    if isinstance(bindings, dict) and profile_name in bindings:
+        del bindings[profile_name]
+        s["account_proxy_bindings"] = bindings
+        save_settings(s)
+
+
+def clear_all_account_proxy_bindings() -> None:
+    """Сбрасывает все индивидуальные привязки прокси для возврата к последовательному порядку."""
+    s = load_settings()
+    s["account_proxy_bindings"] = {}
+    save_settings(s)
+
+
+def get_claude_proxy_host() -> str:
+    """Возвращает настроенный хост прокси для Claude Code."""
+    return str(get_setting("claude_proxy_host", DEFAULT_SETTINGS["claude_proxy_host"])).strip() or "127.0.0.1"
+
+
+def get_claude_proxy_port() -> int:
+    """Возвращает настроенный порт прокси для Claude Code."""
+    val = get_setting("claude_proxy_port", DEFAULT_SETTINGS["claude_proxy_port"])
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return 1015
+
+
+def get_claude_killswitch() -> bool:
+    """Возвращает статус флага Killswitch для Claude Code (по умолчанию True)."""
+    return bool(get_setting("claude_killswitch", DEFAULT_SETTINGS["claude_killswitch"]))
+
+
+def set_claude_proxy_settings(host: str, port: int, killswitch: bool) -> None:
+    """Сохраняет настройки прокси и Killswitch для Claude Code в settings.json."""
+    s = load_settings()
+    s["claude_proxy_host"] = str(host).strip() or "127.0.0.1"
+    try:
+        s["claude_proxy_port"] = int(port)
+    except (ValueError, TypeError):
+        s["claude_proxy_port"] = 1015
+    s["claude_killswitch"] = bool(killswitch)
+    save_settings(s)
+
+
+def get_port_check_interval() -> float:
+    """Возвращает интервал быстрой проверки доступности локальных портов (в секундах)."""
+    try:
+        val = float(get_setting("port_check_interval_seconds", DEFAULT_SETTINGS["port_check_interval_seconds"]))
+        return max(0.5, min(30.0, val))
+    except (ValueError, TypeError):
+        return 2.0
+
+

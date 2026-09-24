@@ -50,13 +50,13 @@
 - **Live Token Validation:** Queries Google OAuth2 endpoints to inspect token expiration and validity without touching CLI terminals.
 - **Background Quota Guard:** A resilient background daemon monitors `cli.log` for HTTP 429 quota exhaustion errors and performs round-robin account switching.
 
-### 📊 4. Geolocation Strategy & Tendencies
-- **Account Usage Analytics:** Continuously logs launches and route probes into a compact history file.
-- **Historical Tendency Detection:** Identifies the country of origin most frequently used by each account.
+### 📊 4. Geolocation Strategy & Connection Time Analytics
+- **Duration-Based Geolocation Preference:** Evaluates account regional habits using **cumulative active connection time** (instead of launch counts), identifying the true primary country.
+- **Continuous Connection Telemetry:** Logs active session durations and updates heartbeat records in `strategy_history.json`.
 - **Compliance Badges:**
-  - `🟢 OK • Region Confirmed`: The currently assigned SOCKS5 matches the account's historical country habit.
+  - `🟢 OK • Region Confirmed`: The currently assigned SOCKS5 matches the account's historical connection time (>50% duration).
   - `🟡 Nice to change`: The account is currently routed through an unfamiliar country, risking Google verification checks. Provides a 1-click button to reassign to the recommended country.
-- **Extended Logs:** Pop-up window with raw event history and unique IP utilization statistics.
+- **Extended Logs:** Pop-up window with session durations and total connection time per unique IP.
 
 ### 💾 5. Encrypted Backup & Factory Reset
 - **AES-256-GCM Encryption:** All settings, tokens, OAuth profiles, and logs are encrypted with a user-defined master password using PBKDF2-HMAC-SHA256 (600,000 iterations).
@@ -170,12 +170,13 @@ The output file will be generated in `dist/HerdrControlCenter.exe`.
 - **Онлайн-валидация:** проверка валидности токена в Google API без открытия терминала.
 - **Фоновый сторож автосмены (Guard):** демон в WSL2 переключает профили по кругу при получении лимитов квоты 429.
 
-### 📊 4. Стратегия & Гео-тенденции
-- **Сводка по аккаунтам:** расчет гео-привычки каждого аккаунта на основе журнала запусков.
+### 📊 4. Стратегия & Аналитика времени соединений
+- **Оценка стратегии по совокупному времени соединений:** предпочтение страны отдается на основе **общей длительности активных подключений** (вместо счетчика запусков).
+- **Непрерывный учет сессий:** запись времени начала, длительности каждого сеанса и автоматическое продление активного соединения в `strategy_history.json`.
 - **Система рекомендаций:**
-  - `🟢 ОК • Регион подтвержден`: текущий SOCKS5 соответствует исторической привычке аккаунта (минимальный риск блокировок).
-  - `🟡 Nice to change`: аккаунт запущен через непривычный регион. Выводится совет и кнопка быстрой смены на рекомендуемую страну.
-- **Расширенный лог:** детальный журнал всех событий и статистика популярности уникальных IP-адресов.
+  - `🟢 ОК • Регион подтвержден`: текущий SOCKS5 соответствует доминирующей стране по времени соединений (минимальный риск блокировок).
+  - `🟡 Nice to change`: аккаунт запущен через непривычный регион. Выводится совет с накопленным временем и кнопка быстрой смены на рекомендуемую страну.
+- **Расширенный лог:** детальный журнал сессий с длительностью и суммарное время работы по уникальным IP-адресам.
 
 ### 💾 5. Резервное копирование & Сброс
 - **Шифрование AES-256-GCM:** архивы шифруются ключом на базе мастер-пароля (PBKDF2, соль 16 байт, 600 000 итераций).
