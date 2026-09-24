@@ -238,13 +238,13 @@ def sync_claude(
     oauth_file: Path | str | None = None,
     log_fn: Callable[[str, str], None] | None = None,
 ) -> dict[str, Any]:
-    """Синхронизирует Claude Code: OAuth2 токен, прокси, Killswitch, ресурсы AionUi и БД."""
+    """Только диагностика. Интеграцию будет выполнять ИИ-агент с помощью skills."""
     def _log(msg: str, lvl: str = "INFO"):
         logger.log(msg, lvl)
         if log_fn:
             log_fn(msg, lvl)
 
-    _log("=== Запуск синхронизации Claude Code для AionUi ===", "STEP")
+    _log("=== Запуск проверки готовности Claude Code для AionUi ===", "STEP")
 
     if token_vault_manager.is_vault_locked():
         _log("Хранилище токенов заблокировано. Авто-разблокировка (CLI/Env)...", "INFO")
@@ -256,6 +256,41 @@ def sync_claude(
             else:
                 _log(f"Ошибка разблокировки (неверный пароль в .env?): {msg}", "ERROR")
                 return {"success": False, "step": "vault_unlock", "error": msg}
+        else:
+            _log("Пароль не установлен в .env! Невозможно разблокировать токены для синхронизации.", "ERROR")
+            return {"success": False, "step": "vault_unlock", "error": "No password in .env"}
+
+    # 1. OAuth токен
+    st = aionui_claude_bridge.get_oauth_status()
+    if st.get("authorized"):
+        _log(f"Используется текущий токен Claude ({st.get('subscription_type', '').upper()}, осталось {st.get('days_left')} дн.)", "SUCCESS")
+    else:
+        _log("Предупреждение: Токен Claude недействителен.", "WARN")
+
+    # 2. Сетевые настройки и SOCKS
+    c_socks_ok = check_port_accessible("127.0.0.1", 1015, timeout=1.0)
+    if c_socks_ok:
+        _log("Claude SOCKS5 Proxy (:1015) ACTIVE и готов принимать соединения.", "SUCCESS")
+    else:
+        _log("Claude SOCKS5 Proxy (:1015) OFFLINE. Проверьте vless2socks.", "ERROR")
+
+    # 3. Доступность AionUi
+    aion_ok, aion_code, aion_msg = check_http_status("http://127.0.0.1:25808", timeout=1.5)
+    if aion_ok:
+        _log(f"AionUi WebUI доступен (HTTP {aion_code}). Готов к интеграции через Skills.", "SUCCESS")
+    else:
+        _log(f"AionUi WebUI недоступен ({aion_msg}).", "ERROR")
+
+    _log("ВНИМАНИЕ: Все активные настройки интеграции делегированы ИИ-агентам через Skills.", "INFO")
+    _log("См. SKILLS.md в корне проекта для настройки AionUi.", "INFO")
+    _log("=== Диагностика Claude завершена ===", "SUCCESS")
+    
+    return {
+        "success": True,
+        "socks": c_socks_ok,
+        "aion": aion_ok,
+        "auth": st.get("authorized", False)
+    }
         else:
             _log("Пароль не установлен в .env! Невозможно разблокировать токены для синхронизации.", "ERROR")
             return {"success": False, "step": "vault_unlock", "error": "No password in .env"}
@@ -310,24 +345,47 @@ def sync_claude(
 
 
 def sync_gemini(log_fn: Callable[[str, str], None] | None = None) -> dict[str, Any]:
-    """Синхронизирует Gemini Farm: профили, изолированные SOCKS5 порты 1081+, OmniRoute Combo и AionUi."""
+    """Только диагностика Gemini Farm конфигурации. Интеграцию выполняет агент."""
     def _log(msg: str, lvl: str = "INFO"):
         logger.log(msg, lvl)
         if log_fn:
             log_fn(msg, lvl)
 
-    _log("=== Запуск синхронизации Gemini Farm для AionUi ===", "STEP")
+    _log("=== Запуск проверки состояния Gemini Farm ===", "STEP")
 
     if token_vault_manager.is_vault_locked():
-        _log("Хранилище токенов заблокировано. Авто-разблокировка (CLI/Env)...", "INFO")
         pw = backup_manager.load_backup_password()
         if pw:
-            ok, msg = token_vault_manager.unlock_tokens(pw)
-            if ok:
-                _log(f"Сейф разблокирован: {msg}", "SUCCESS")
-            else:
-                _log(f"Ошибка разблокировки (неверный пароль в .env?): {msg}", "ERROR")
-                return {"success": False, "step": "vault_unlock", "error": msg}
+            token_vault_manager.unlock_tokens(pw)
+
+    # 1. Профили Herdr
+    profiles = gemini_manager.list_profiles()
+    _log(f"Обнаружено профилей Gemini в системе Herdr: {len(profiles)}", "INFO")
+
+    active_conns = []
+    for prof in profiles:
+        name = prof.get("name", "Account")
+        email = prof.get("email", "unknown")
+        port = prof.get("port", 1082)
+        alive = check_port_accessible("127.0.0.1", port, timeout=0.5)
+        status_icon = "🟢" if alive else "🔴"
+        _log(f"{status_icon} Профиль Herdr '{name}' ({email}) ➔ SOCKS5 : {port} [Слушает: {alive}]", "INFO")
+        active_conns.append({"name": name, "email": email, "port": port, "alive": alive})
+
+    omni_ok, omni_code, omni_msg = check_http_status("http://127.0.0.1:20128", timeout=1.5)
+    if omni_ok:
+        _log(f"OmniRoute Gateway ONLINE (HTTP {omni_code}).", "SUCCESS")
+    else:
+        _log(f"OmniRoute Gateway OFFLINE ({omni_msg}). Запустите OmniRoute.", "WARN")
+
+    _log("ВНИМАНИЕ: Активная настройка БД провайдеров делегирована ИИ агентам через Skills.", "INFO")
+    _log("=== Диагностика Gemini завершена ===", "SUCCESS")
+    
+    return {
+        "success": True,
+        "profiles": active_conns,
+        "omni_ok": omni_ok,
+    }
         else:
             _log("Пароль не установлен в .env! Невозможно разблокировать токены для синхронизации.", "ERROR")
             return {"success": False, "step": "vault_unlock", "error": "No password in .env"}

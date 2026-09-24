@@ -1,14 +1,8 @@
 {
-  "language": "en",
   "auto_proxy_failover": true,
   "auto_refresh_routes": true,
+  "backup_dir": ".",
   "auto_backup_enabled": false,
   "backup_interval_hours": 12,
-  "backup_dir": "C:\\Users\\f\\Documents\\HerdrBackups",
-  "last_backup_time": "-",
-  "account_proxy_bindings": {},
-  "claude_proxy_host": "127.0.0.1",
-  "claude_proxy_port": 1015,
-  "claude_killswitch": true,
-  "port_check_interval_seconds": 2.0
+  "last_backup_time": "-"
 }
