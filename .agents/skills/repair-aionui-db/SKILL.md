@@ -19,7 +19,22 @@ description: >-
 ```
 Или из WSL:
 ```bash
-python3 /mnt/d/My\ files/herdrControlGui/scripts/repair_aionui_db.py
+python3 "/mnt/d/My files/aionUi_helper/scripts/repair_aionui_db.py"
 ```
 
+Перед запуском убедитесь, что aiWatcher уважает флаг обслуживания:
+```bash
+grep -c maintenance "/mnt/d/My files/aiWatcher/watcher_config.json"   # 1 = ок, 0 = нажать Turn OFF Watcher
+```
+Иначе сторож поднимет AionUi посреди ремонта и база снова испортится. Скрипт это обнаружит
+и выведет «Ремонт ОТМЕНЁН», не трогая базу.
+
 Скрипт автономно остановит процесс, создаст резервную копию, перенесет все таблицы и сообщения в чистый файл без повреждений, пересоздаст индексы, очистит блокировки и перезапустит AionUi.
+
+## Проверка результата
+
+- В выводе: `✓ AionUi остановлен, повторных запусков за 8 сек не было`, `[('ok',)]`, `УСПЕХ`.
+- `ls ~/.aionui-web/aionui-backend.db*`: при работающем AionUi есть и `-wal`, и `-shm`.
+- Бэкап до ремонта: `~/.aionui-web/db_backups/aionui-backend.before_repair_*.db` (+ `-wal`, `-shm`).
+- Если после ремонта открывается экран входа с `Connection failed`, смотрите скилл `aionui-login-connection-failed`.
+- Путь к скрипту: `/mnt/d/My files/aionUi_helper/scripts/repair_aionui_db.py` (использует `aionui_maint.py` рядом).

@@ -87,6 +87,14 @@ class TestConfig(TmpDirCase):
         self.assertIn(".maintenance", cfg["apps"]["aionui"]["check_cmd"])
         self.assertIn("--no-open", cfg["apps"]["aionui"]["start_cmd"])
 
+    def test_default_omniroute_cmds(self):
+        om = wm.DEFAULT_CONFIG["apps"]["omniroute"]
+        self.assertIn("20128", om["check_cmd"])
+        self.assertNotIn("ps aux", om["check_cmd"])
+        self.assertIn("omniroute serve", om["start_cmd"])
+        self.assertNotIn("omniroute start", om["start_cmd"])
+        self.assertIn("tmux new -d -s omniroute", om["start_cmd"])
+
     def test_default_start_cmd_strips_all_proxy_vars(self):
         cmd = wm.DEFAULT_CONFIG["apps"]["aionui"]["start_cmd"]
         for v in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
@@ -110,6 +118,9 @@ class TestConfig(TmpDirCase):
         # опасные старые команды AionUi заменены безопасными
         self.assertEqual(cfg["apps"]["aionui"]["check_cmd"], wm.AIONUI_CHECK_CMD)
         self.assertEqual(cfg["apps"]["aionui"]["start_cmd"], wm.AIONUI_START_CMD)
+        # OmniRoute v3.8+: `omniroute start` не существует, grep по имени процесса даёт ложное «живой»
+        self.assertEqual(cfg["apps"]["omniroute"]["check_cmd"], wm.OMNIROUTE_CHECK_CMD)
+        self.assertEqual(cfg["apps"]["omniroute"]["start_cmd"], wm.OMNIROUTE_START_CMD)
         # импорт сохранён в собственный конфиг, исходный файл не изменён
         self.assertTrue(self.cfg_path.exists())
         self.assertIn("ps aux | grep '[a]ionui-web'", legacy.read_text(encoding="utf-8"))
