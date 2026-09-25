@@ -15,11 +15,39 @@ class TestAppUI(unittest.TestCase):
         self.patcher = patch.object(config_app.HerdrConfigApp, "refresh_routes_async")
         self.mock_refresh = self.patcher.start()
 
+        # Встроенный aiWatcher: в тестах не запускаем поток, не трогаем WSL и настоящий watchdog_config.json
+        import tempfile
+        from pathlib import Path
+        import watchdog_manager
+        self._aiw_tmp = tempfile.TemporaryDirectory()
+        self._aiw_patches = [
+            patch.object(watchdog_manager, "CONFIG_FILE", Path(self._aiw_tmp.name) / "watchdog_config.json"),
+            patch.object(watchdog_manager, "LEGACY_CONFIG_FILE", Path(self._aiw_tmp.name) / "none.json"),
+            patch.object(watchdog_manager, "run_cmd", lambda cmd, timeout=30: (True, "")),
+            patch.object(watchdog_manager, "find_external_watchers", lambda *a, **k: []),
+            patch.object(watchdog_manager.WatchdogService, "start"),
+        ]
+        # Тест не должен менять настоящий settings.json (раньше test_claude_save_action записывал
+        # в него порт Claude 1099). Работаем с копией; язык фиксируем русский — на нём написаны проверки.
+        import json, shutil
+        tmp_settings = Path(self._aiw_tmp.name) / "settings.json"
+        try:
+            data = json.loads(settings_manager.SETTINGS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        data["language"] = "ru"
+        tmp_settings.write_text(json.dumps(data), encoding="utf-8")
+        self._aiw_patches.append(patch.object(settings_manager, "SETTINGS_FILE", tmp_settings))
+        for p in self._aiw_patches:
+            p.start()
+
         try:
             self.app = config_app.HerdrConfigApp()
             self.app.withdraw()  # Скрываем окно во время тестов
         except tk.TclError:
             self.patcher.stop()
+            for p in reversed(self._aiw_patches):
+                p.stop()
             self.skipTest("Tkinter display/Tcl interpreter not available")
 
     def tearDown(self):
@@ -28,6 +56,10 @@ class TestAppUI(unittest.TestCase):
         except Exception:
             pass
         self.patcher.stop()
+        for p in reversed(getattr(self, "_aiw_patches", [])):
+            p.stop()
+        if hasattr(self, "_aiw_tmp"):
+            self._aiw_tmp.cleanup()
 
     def test_app_initialization(self):
         """Проверяет, что главное окно успешно инициализируется со всеми элементами управления Claude."""
