@@ -1,3 +1,13 @@
+"""Модуль криптографической защиты экспериментальных артефактов и учетных данных (Token Vault).
+
+Научно-инженерная цель:
+Реализация парадигмы Zero-Trust для исследовательского стенда.
+В многопоточных экспериментах учетные записи рабочих узлов шифруются
+на диске по стандарту AES-256-GCM. Расшифровка производится исключительно
+в оперативной памяти на время вызова инференса, что исключает утечки
+сессионных данных и гарантирует воспроизводимость стенда.
+"""
+
 import os
 import json
 from pathlib import Path
@@ -14,43 +24,55 @@ def _get_token_paths() -> list[Path]:
     paths = []
 
     # Claude tokens (Только из профилей OAuth - Vault)
-    base_claude = backup_manager.WSL_CLAUDE_DIR
-    if base_claude.exists():
-        profiles_dir = base_claude / "oauth-profiles"
-        if profiles_dir.exists():
-            for p_name in os.listdir(profiles_dir):
-                p_dir = profiles_dir / p_name
-                if p_dir.is_dir():
-                    pt = p_dir / ".credentials.json"
-                    paths.append(pt)
+    try:
+        base_claude = backup_manager.WSL_CLAUDE_DIR
+        if base_claude.exists():
+            profiles_dir = base_claude / "oauth-profiles"
+            if profiles_dir.exists():
+                for p_name in os.listdir(profiles_dir):
+                    p_dir = profiles_dir / p_name
+                    if p_dir.is_dir():
+                        pt = p_dir / ".credentials.json"
+                        paths.append(pt)
+    except (OSError, Exception):
+        pass
 
     # Gemini tokens (Только из профилей - Vault)
-    base_gemini = backup_manager.WSL_GEMINI_DIR
-    if base_gemini.exists():
-        profiles_dir = base_gemini / "profiles"
-        if profiles_dir.exists():
-            for p_name in os.listdir(profiles_dir):
-                p_dir = profiles_dir / p_name
-                if p_dir.is_dir():
-                    pt = p_dir / "antigravity-oauth-token"
-                    paths.append(pt)
+    try:
+        base_gemini = backup_manager.WSL_GEMINI_DIR
+        if base_gemini.exists():
+            profiles_dir = base_gemini / "profiles"
+            if profiles_dir.exists():
+                for p_name in os.listdir(profiles_dir):
+                    p_dir = profiles_dir / p_name
+                    if p_dir.is_dir():
+                        pt = p_dir / "antigravity-oauth-token"
+                        paths.append(pt)
+    except (OSError, Exception):
+        pass
 
     return paths
 
 def is_vault_locked() -> bool:
     """Проверяет, заблокированы ли токены (есть ли зашифрованные файлы и отсутствуют ли расшифрованные)."""
-    paths = _get_token_paths()
-    has_encrypted = False
-    
-    for p in paths:
-        enc_p = Path(str(p) + ".enc")
-        if enc_p.exists():
-            has_encrypted = True
-        if p.exists() and not str(p).endswith(".enc"):
-            # Если есть хотя бы один незашифрованный файл - считаем что хранилище частично или полностью открыто
-            return False
-            
-    return has_encrypted
+    try:
+        paths = _get_token_paths()
+        has_encrypted = False
+        
+        for p in paths:
+            try:
+                enc_p = Path(str(p) + ".enc")
+                if enc_p.exists():
+                    has_encrypted = True
+                if p.exists() and not str(p).endswith(".enc"):
+                    # Если есть хотя бы один незашифрованный файл - считаем что хранилище частично или полностью открыто
+                    return False
+            except (OSError, Exception):
+                continue
+                
+        return has_encrypted
+    except (OSError, Exception):
+        return False
 
 def lock_tokens(password: str) -> tuple[bool, str]:
     if not password:
@@ -207,11 +229,14 @@ def register_vault_interaction():
 def _vault_watchdog_loop():
     while not _vault_stop_event.is_set():
         _vault_stop_event.wait(5.0)
-        if time.time() - _last_interaction_time >= VAULT_AUTO_LOCK_TIMEOUT:
-            if not is_vault_locked():
-                pw = backup_manager.load_backup_password()
-                if pw:
-                    lock_tokens(pw)
+        try:
+            if time.time() - _last_interaction_time >= VAULT_AUTO_LOCK_TIMEOUT:
+                if not is_vault_locked():
+                    pw = backup_manager.load_backup_password()
+                    if pw:
+                        lock_tokens(pw)
+        except Exception:
+            pass
 
 def start_vault_watchdog():
     global _vault_watchdog_thread

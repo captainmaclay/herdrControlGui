@@ -29,6 +29,7 @@ a = Analysis(
         'backup_manager',
         'claude_manager',
         'claude_oauth_manager',
+        'watchdog_manager',
         'i18n',
         'pystray',
         'PIL',

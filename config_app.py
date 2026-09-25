@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 from pathlib import Path
 import socket
 import sys
@@ -62,6 +63,7 @@ import node_isolate_manager
 import claude_oauth_manager
 import integrations_manager
 import token_vault_manager
+import watchdog_manager
 import i18n
 from i18n import t
 
@@ -603,9 +605,9 @@ class HerdrConfigApp(tk.Tk):
         ).pack(anchor="w")
 
     def _build_page_routes(self, parent: tk.Frame):
-        # ── Карточка 1: Herdr & Агенты в WSL2 ───────────────────
-        self.herdr_card = self._build_herdr_card(parent)
-        self.herdr_card.pack(fill="x", pady=(0, 10))
+        # ── Карточка 1: aiWatcher — сторож сервисов WSL2 ─────────
+        self.aiwatcher_card = self._build_aiwatcher_card(parent)
+        self.aiwatcher_card.pack(fill="x", pady=(0, 10))
 
         # ── Карточка 2: Google Gemini (SOCKS5) ──────────────────
         self.gemini_card = self._build_gemini_card(parent)
@@ -615,7 +617,23 @@ class HerdrConfigApp(tk.Tk):
         self.claude_card = self._build_claude_card(parent)
         self.claude_card.pack(fill="x")
 
-    def _build_herdr_card(self, parent: tk.Frame) -> tk.Frame:
+    # ───────────────────────── aiWatcher ─────────────────────────
+    AIW_STATUS_STYLE = {
+        watchdog_manager.ST_UNKNOWN:      ("aiw_st_unknown", "subtext"),
+        watchdog_manager.ST_RUNNING:      ("aiw_st_running", "green"),
+        watchdog_manager.ST_STARTING:     ("aiw_st_starting", "yellow"),
+        watchdog_manager.ST_RESTARTED:    ("aiw_st_restarted", "accent_peach"),
+        watchdog_manager.ST_START_FAILED: ("aiw_st_start_failed", "red"),
+        watchdog_manager.ST_DISABLED:     ("aiw_st_disabled", "subtext"),
+        watchdog_manager.ST_PAUSED:       ("aiw_st_paused", "subtext"),
+        watchdog_manager.ST_EXTERNAL:     ("aiw_st_external", "yellow"),
+        watchdog_manager.ST_UNHEALTHY:    ("aiw_st_unhealthy", "accent_peach"),
+        watchdog_manager.ST_HEALING:      ("aiw_st_healing", "yellow"),
+        watchdog_manager.ST_HEAL_FAILED:  ("aiw_st_heal_failed", "red"),
+    }
+
+    def _build_aiwatcher_card(self, parent: tk.Frame) -> tk.Frame:
+        """Карточка встроенного aiWatcher: сторож AionUi и OmniRoute в WSL2 (бывший D:\\My files\\aiWatcher)."""
         card = tk.Frame(parent, bg=C["card"], bd=1, relief="solid")
         card.configure(highlightbackground=C["border"], highlightthickness=1)
 
@@ -624,30 +642,234 @@ class HerdrConfigApp(tk.Tk):
 
         head = tk.Frame(pad, bg=C["card"])
         head.pack(fill="x", pady=(0, 6))
+        tk.Label(head, text=t("aiw_title"), font=FONT_TITLE, fg=C["fg"], bg=C["card"]).pack(side="left")
+        self.aiw_badge = tk.Label(head, text=t("aiw_badge_off"), font=FONT_BOLD,
+                                  bg=C["card_inner"], fg=C["subtext"], padx=8, pady=2)
+        self.aiw_badge.pack(side="right")
 
-        tk.Label(head, text=t("herdr_title"), font=FONT_TITLE, fg=C["fg"], bg=C["card"]).pack(side="left")
+        self.aiw_desc_lbl = tk.Label(pad, text=t("aiw_desc"), font=FONT_SUB, fg=C["subtext"],
+                                     bg=C["card"], anchor="w", justify="left")
+        self.aiw_desc_lbl.pack(fill="x", pady=(0, 6))
 
-        self.herdr_badge = tk.Label(
-            head, text=t("herdr_badge_waiting"), font=FONT_BOLD,
-            bg=C["card_inner"], fg=C["subtext"], padx=8, pady=2
+        # Панель управления
+        ctl = tk.Frame(pad, bg=C["card"])
+        ctl.pack(fill="x", pady=(0, 6))
+        self.aiw_toggle_btn = tk.Button(
+            ctl, text=t("aiw_btn_turn_on"), font=FONT_BOLD,
+            bg=C["accent_blue"], fg="#11111b", activebackground=C["accent_hover"],
+            activeforeground="#11111b", bd=0, padx=8, pady=2, cursor="hand2",
+            command=self._aiw_toggle_watcher
         )
-        self.herdr_badge.pack(side="right")
-
-        self.panes_frame = tk.Frame(pad, bg=C["card_inner"], bd=1, relief="solid")
-        self.panes_frame.configure(highlightbackground=C["border"], highlightthickness=1)
-        self.panes_frame.pack(fill="x", pady=(4, 0))
-
-        self.panes_inner = tk.Frame(self.panes_frame, bg=C["card_inner"])
-        self.panes_inner.pack(fill="x", padx=12, pady=6)
-
-        self.herdr_panes_lbl = tk.Label(
-            self.panes_inner,
-            text=t("herdr_reading_panes"),
-            font=FONT_MAIN, fg=C["subtext"], bg=C["card_inner"], anchor="w", justify="left"
+        self.aiw_toggle_btn.pack(side="left", padx=(0, 8))
+        self.aiw_check_btn = tk.Button(
+            ctl, text=t("aiw_btn_check_now"), font=FONT_BOLD,
+            bg=C["card_inner"], fg=C["fg"], activebackground=C["card_hover"],
+            activeforeground=C["fg"], bd=0, padx=8, pady=2, cursor="hand2",
+            command=self._aiw_check_now
         )
-        self.herdr_panes_lbl.pack(fill="x")
+        self.aiw_check_btn.pack(side="left", padx=(0, 8))
+        self.aiw_interval_lbl = tk.Label(ctl, text="", font=FONT_SUB, fg=C["subtext"], bg=C["card"])
+        self.aiw_interval_lbl.pack(side="left")
 
+        # Ручное обслуживание AionUi (скрипты aionUi_helper, под флагом обслуживания)
+        ctl2 = tk.Frame(pad, bg=C["card"])
+        ctl2.pack(fill="x", pady=(0, 6))
+        self.aiw_restart_btn = tk.Button(
+            ctl2, text=t("aiw_btn_restart_aionui"), font=FONT_BOLD,
+            bg=C["card_inner"], fg=C["fg"], activebackground=C["card_hover"],
+            activeforeground=C["fg"], bd=0, padx=8, pady=2, cursor="hand2",
+            command=self._aiw_restart_aionui
+        )
+        self.aiw_restart_btn.pack(side="left", padx=(0, 8))
+        self.aiw_repair_btn = tk.Button(
+            ctl2, text=t("aiw_btn_repair_db"), font=FONT_BOLD,
+            bg=C["card_inner"], fg=C["fg"], activebackground=C["card_hover"],
+            activeforeground=C["fg"], bd=0, padx=8, pady=2, cursor="hand2",
+            command=self._aiw_repair_db
+        )
+        self.aiw_repair_btn.pack(side="left", padx=(0, 8))
+
+        # Предупреждение о внешнем (отдельном) aiWatcher — показывается только при обнаружении
+        self.aiw_external_frame = tk.Frame(pad, bg=C["card"])
+        self.aiw_external_lbl = tk.Label(self.aiw_external_frame, text=t("aiw_external_warning"),
+                                         font=FONT_BOLD, fg=C["yellow"], bg=C["card"],
+                                         anchor="w", justify="left", wraplength=560)
+        self.aiw_external_lbl.pack(side="left", fill="x", expand=True)
+        self.aiw_stop_external_btn = tk.Button(
+            self.aiw_external_frame, text=t("aiw_btn_stop_external"), font=FONT_BOLD,
+            bg=C["accent_peach"], fg="#11111b", activebackground=C["accent_hover"],
+            activeforeground="#11111b", bd=0, padx=8, pady=2, cursor="hand2",
+            command=self._aiw_stop_external
+        )
+        self.aiw_stop_external_btn.pack(side="right")
+
+        # Сервисы
+        self.aiw_apps_box = tk.Frame(pad, bg=C["card_inner"], bd=1, relief="solid")
+        self.aiw_apps_box.configure(highlightbackground=C["border"], highlightthickness=1)
+        self.aiw_apps_box.pack(fill="x", pady=(0, 6))
+        apps_in = tk.Frame(self.aiw_apps_box, bg=C["card_inner"])
+        apps_in.pack(fill="x", padx=12, pady=6)
+
+        # События из фонового потока сторожа идут через очередь: Tk нельзя трогать не из главного потока
+        self._aiw_queue: "queue.Queue[tuple[str, str, str]]" = queue.Queue()
+        self.aiwatcher = watchdog_manager.WatchdogService(on_event=self._aiw_on_event_threadsafe)
+        self.aiw_app_vars: dict[str, tk.BooleanVar] = {}
+        self.aiw_app_checks: dict[str, tk.Checkbutton] = {}
+        self.aiw_app_labels: dict[str, tk.Label] = {}
+        for name, app in self.aiwatcher.config["apps"].items():
+            row = tk.Frame(apps_in, bg=C["card_inner"])
+            row.pack(fill="x", pady=1)
+            var = tk.BooleanVar(value=app.get("enabled", True))
+            self.aiw_app_vars[name] = var
+            label_key = f"aiw_app_{name}"
+            label = t(label_key)
+            cb = tk.Checkbutton(
+                row, text=name if label == label_key else label,
+                variable=var, font=FONT_BOLD, fg=C["fg"], bg=C["card_inner"],
+                activebackground=C["card_inner"], activeforeground=C["fg"], selectcolor=C["input_bg"],
+                cursor="hand2", command=lambda n=name: self._aiw_toggle_app(n)
+            )
+            cb.pack(side="left")
+            self.aiw_app_checks[name] = cb
+            lbl = tk.Label(row, text=t("aiw_st_unknown"), font=FONT_MONO_BOLD, fg=C["subtext"], bg=C["card_inner"])
+            lbl.pack(side="right")
+            self.aiw_app_labels[name] = lbl
+
+        # Журнал
+        tk.Label(pad, text=t("aiw_log_title"), font=FONT_BOLD, fg=C["subtext"], bg=C["card"],
+                 anchor="w").pack(fill="x")
+        log_box = tk.Frame(pad, bg=C["card_inner"], bd=1, relief="solid")
+        log_box.configure(highlightbackground=C["border"], highlightthickness=1)
+        log_box.pack(fill="x")
+        self.aiw_log_txt = tk.Text(log_box, height=5, font=FONT_MONO, bg=C["card_inner"], fg=C["fg"],
+                                   bd=0, wrap="word", state="disabled", highlightthickness=0)
+        aiw_sb = tk.Scrollbar(log_box, command=self.aiw_log_txt.yview)
+        self.aiw_log_txt.configure(yscrollcommand=aiw_sb.set)
+        aiw_sb.pack(side="right", fill="y")
+        self.aiw_log_txt.pack(side="left", fill="x", expand=True, padx=6, pady=4)
+
+        self._aiw_refresh_controls()
+        self._aiw_poll_id = self.after(200, self._aiw_poll_queue)
         return card
+
+    # ── aiWatcher: события из фонового потока ──
+    def _aiw_on_event_threadsafe(self, kind: str, app: str, text: str):
+        """Вызывается из любого потока: только кладёт событие в очередь."""
+        if getattr(self, "_closing", False):
+            return
+        self._aiw_queue.put((kind, app, text))
+
+    def _aiw_drain_queue(self):
+        """Главный поток: применяет накопившиеся события к интерфейсу."""
+        while True:
+            try:
+                kind, app, text = self._aiw_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._aiw_on_event(kind, app, text)
+
+    def _aiw_poll_queue(self):
+        if getattr(self, "_closing", False):
+            return
+        try:
+            self._aiw_drain_queue()
+        finally:
+            if not getattr(self, "_closing", False):
+                self._aiw_poll_id = self.after(200, self._aiw_poll_queue)
+
+    def _aiw_on_event(self, kind: str, app: str, text: str):
+        if getattr(self, "_closing", False):
+            return
+        if kind == "status":
+            self._aiw_set_app_status(app, text)
+            self._aiw_refresh_controls()
+        else:
+            self._aiw_append_log(text)
+            if kind in ("external", "action"):
+                self._aiw_refresh_controls()
+
+    def _aiw_append_log(self, line: str):
+        try:
+            self.aiw_log_txt.config(state="normal")
+            self.aiw_log_txt.insert("end", line + "\n")
+            if int(self.aiw_log_txt.index("end-1c").split(".")[0]) > 300:
+                self.aiw_log_txt.delete("1.0", "51.0")
+            self.aiw_log_txt.see("end")
+            self.aiw_log_txt.config(state="disabled")
+        except tk.TclError:
+            pass
+
+    def _aiw_set_app_status(self, app: str, status: str):
+        lbl = self.aiw_app_labels.get(app)
+        if not lbl:
+            return
+        key, color = self.AIW_STATUS_STYLE.get(status, ("aiw_st_unknown", "subtext"))
+        lbl.config(text=t(key), fg=C[color])
+
+    def _aiw_refresh_controls(self):
+        svc = self.aiwatcher
+        if svc.external:
+            self.aiw_badge.config(text=t("aiw_badge_external"), bg=C["yellow"], fg="#11111b")
+            if not self.aiw_external_frame.winfo_manager():
+                self.aiw_external_frame.pack(fill="x", pady=(0, 6), before=self.aiw_apps_box)
+        else:
+            if self.aiw_external_frame.winfo_manager():
+                self.aiw_external_frame.pack_forget()
+            if svc.enabled:
+                self.aiw_badge.config(text=t("aiw_badge_on"), bg=C["green"], fg="#11111b")
+            else:
+                self.aiw_badge.config(text=t("aiw_badge_off"), bg=C["red"], fg="#11111b")
+        self.aiw_toggle_btn.config(text=t("aiw_btn_turn_off") if svc.enabled else t("aiw_btn_turn_on"))
+        self.aiw_interval_lbl.config(text=t("aiw_interval", sec=svc.config.get("interval", 5)))
+        for name, st in list(svc.statuses.items()):
+            self._aiw_set_app_status(name, st)
+        busy = "disabled" if svc.action_running else "normal"
+        self.aiw_restart_btn.config(state=busy)
+        self.aiw_repair_btn.config(state=busy)
+
+    # ── aiWatcher: действия пользователя ──
+    def _aiw_toggle_watcher(self):
+        self.aiwatcher.set_enabled(not self.aiwatcher.enabled)
+        self._aiw_refresh_controls()
+
+    def _aiw_toggle_app(self, name: str):
+        self.aiwatcher.set_app_enabled(name, self.aiw_app_vars[name].get())
+
+    def _aiw_check_now(self):
+        self.aiwatcher.wake(recheck_external=True)
+
+    def _aiw_restart_aionui(self):
+        """Чистый перезапуск AionUi (fix_aionui_login.py --fix): лечит экран входа «Connection failed»."""
+        if self.aiwatcher.run_action(t("aiw_action_restart"), watchdog_manager.AIONUI_RESTART_CMD,
+                                     watchdog_manager.HEAL_TIMEOUT_S):
+            self._aiw_refresh_controls()
+
+    def _aiw_repair_db(self):
+        """Ремонт базы AionUi (repair_aionui_db.py): при «database disk image is malformed»."""
+        if not messagebox.askyesno(t("aiw_title"), t("aiw_confirm_repair_db")):
+            return
+        if self.aiwatcher.run_action(t("aiw_action_repair"), watchdog_manager.AIONUI_REPAIR_DB_CMD,
+                                     watchdog_manager.REPAIR_TIMEOUT_S):
+            self._aiw_refresh_controls()
+
+    def _aiw_stop_external(self):
+        procs = list(self.aiwatcher.external)
+        if not procs:
+            return
+        if not messagebox.askyesno(t("aiw_title"), t("aiw_confirm_stop_external", count=len(procs))):
+            return
+
+        def worker():
+            killed = watchdog_manager.stop_external_watchers(procs)
+            autorun_off = watchdog_manager.disable_legacy_autorun()
+            self.aiwatcher.refresh_external(force=True)
+            msg = t("aiw_external_stopped", count=killed)
+            if autorun_off:
+                msg += " " + t("aiw_autorun_disabled")
+            self._aiw_on_event_threadsafe("external", "", msg)
+            self.aiwatcher.wake()
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _build_gemini_card(self, parent: tk.Frame) -> tk.Frame:
         card = tk.Frame(parent, bg=C["card"], bd=1, relief="solid")
@@ -893,6 +1115,11 @@ class HerdrConfigApp(tk.Tk):
             import traceback, logging
             logging.error(f"SILENT CRASH IN ENFORCE_ISOLATION: {e}\n{traceback.format_exc()}")
 
+    def _save_claude_settings_action(self):
+        h = self.claude_host_var.get().strip()
+        try:
+            p = int(self.claude_port_var.get())
+        except ValueError:
             return
         ks = bool(self.claude_killswitch_var.get())
         ni = getattr(self, "claude_node_isolate_var", None)
@@ -2795,13 +3022,14 @@ class HerdrConfigApp(tk.Tk):
             
         self.backup_password_var.set("")
         
-        # Полностью перезагружаем стейт 
-        self.load_data() 
+        # Полностью перезагружаем стейт
+        # (раньше здесь были self.load_data() и self.update_content() — таких методов нет,
+        #  «Стереть все данные» падало с AttributeError; найдено тестом test_ui_command_refs.py)
         self.load_proxies_data()
         self.load_gemini_profiles_data()
-        
-        # Обновляем все UI
-        self.update_content()
+
+        # Обновляем все UI: перерисовываем текущую вкладку
+        self.switch_page(getattr(self, "active_tab", "routes"))
 
         if ok:
             messagebox.showinfo("Очистка завершена", f"✓ {msg}")
@@ -3599,10 +3827,11 @@ class HerdrConfigApp(tk.Tk):
                 if not getattr(self, "_closing", False):
                     self.after(0, self._apply_route_results, res)
             except Exception as e:
+                err_str = str(e)
                 def _handle_err():
                     self.is_checking_routes = False
                     self.refresh_btn.config(state="normal", text=t("btn_check_all"))
-                    self.quick_status.config(text=f"✕ Ошибка проверки: {e}", fg=C["red"])
+                    self.quick_status.config(text=f"✕ Ошибка проверки: {err_str}", fg=C["red"])
                 try:
                     if not getattr(self, "_closing", False):
                         self.after(0, _handle_err)
@@ -3618,41 +3847,6 @@ class HerdrConfigApp(tk.Tk):
 
         gemini = res.get("gemini", {})
         claude = res.get("claude", {})
-        herdr = res.get("herdr_wsl", {})
-
-        # 1. Herdr в WSL2
-        if herdr.get("server_running"):
-            self.herdr_badge.config(
-                text=f"{t('herdr_badge_active')} ({herdr.get('pane_count', 0)})",
-                bg=C["green"], fg="#11111b"
-            )
-            agents = herdr.get("agents", [])
-            lines = []
-            for a in agents:
-                agent_name = a.get("agent", "unknown")
-                status = a.get("status", "running")
-                pane_id = a.get("pane_id", "")
-                if agent_name == "agy":
-                    icon = "🔮"
-                    desc = "AGY CLI (Gemini) • SOCKS5"
-                elif agent_name == "claude":
-                    icon = "🧡"
-                    desc = "Claude Code • Direct IP"
-                else:
-                    icon = "💻"
-                    desc = f"{t('pane_terminal')} ({agent_name})"
-                lines.append(f"{icon} {t('pane_panel')} {pane_id}: {desc} | {t('pane_status')}: [{status}]")
-
-            if lines:
-                self.herdr_panes_lbl.config(text="\n".join(lines), fg=C["fg"])
-            else:
-                self.herdr_panes_lbl.config(text=t("herdr_no_panes"), fg=C["subtext"])
-        else:
-            self.herdr_badge.config(text=t("herdr_not_running"), bg=C["red"], fg="#11111b")
-            self.herdr_panes_lbl.config(
-                text=t("herdr_wsl_stopped"),
-                fg=C["red"]
-            )
 
         # 2. Gemini
         active_port = gemini.get("port", gemini_manager.BASE_SOCKS5_PORT)
@@ -3734,8 +3928,8 @@ class HerdrConfigApp(tk.Tk):
         self._apply_claude_route_ui(claude)
 
         # 4. Общий статус
-        if herdr.get("server_running") and gemini.get("online") and claude.get("online"):
-            self.quick_status.config(text=t("status_herdr_active"), fg=C["green"])
+        if gemini.get("online") and claude.get("online"):
+            self.quick_status.config(text=t("status_routes_ok"), fg=C["green"])
         else:
             self.quick_status.config(text=t("status_monitoring_ok"), fg=C["yellow"])
 
@@ -3907,6 +4101,16 @@ class HerdrConfigApp(tk.Tk):
 
     def destroy(self):
         self._closing = True
+        if getattr(self, "aiwatcher", None) is not None:
+            try:
+                self.aiwatcher.stop(timeout=1.0)
+            except Exception:
+                pass
+        if getattr(self, "_aiw_poll_id", None):
+            try:
+                self.after_cancel(self._aiw_poll_id)
+            except Exception:
+                pass
         if hasattr(self, "_on_integration_log_cb"):
             try:
                 integrations_manager.logger.remove_listener(self._on_integration_log_cb)
@@ -4022,6 +4226,9 @@ def main():
     print(f"[{time.strftime('%X')}] PID={os.getpid()} lock acquired, initializing HerdrConfigApp", flush=True)
     try:
         app = HerdrConfigApp()
+        # Встроенный aiWatcher (сторож AionUi / OmniRoute в WSL2) запускается только в настоящем приложении,
+        # а не при создании окна в тестах: иначе тесты запускали бы сервисы в WSL.
+        app.aiwatcher.start()
         print(f"[{time.strftime('%X')}] PID={os.getpid()} HerdrConfigApp initialized, starting server", flush=True)
         start_instance_server(app)
         print(f"[{time.strftime('%X')}] PID={os.getpid()} entering mainloop", flush=True)

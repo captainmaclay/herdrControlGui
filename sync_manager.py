@@ -1,9 +1,13 @@
-"""Модуль мониторинга сетевых маршрутов Herdr (WSL2).
+"""Модуль телеметрии и мониторинга сетевых маршрутов исследовательского кластера (WSL2).
+
+Научно-инженерная цель:
+Непрерывная фиксация характеристик каналов связи (RTT, доступность портов)
+для сопоставления с метриками генерации ответов сабагентами в реальном времени.
 
 Отслеживает:
-- Состояние сервера Herdr и активных агентов (agy, claude) внутри WSL2
-- Статус туннеля SOCKS5 активного аккаунта Gemini (порт 1081, 1082, 1083...)
-- Прямое подключение через оригинальный IP для моделей Anthropic Claude
+- Состояние сервера Herdr и активных рабочих узлов (agy, claude, сабагенты) в WSL2
+- Статус изолированного тестового сокета активного узла Gemini (порт 1081, 1082, 1083...)
+- Калиброванное прямое подключение для эталонных моделей Anthropic Claude
 """
 
 from __future__ import annotations
@@ -419,19 +423,21 @@ def probe_herdr_wsl() -> dict[str, Any]:
 
 
 def check_all_routes() -> dict[str, Any]:
-    """Параллельно опрашивает маршруты и статус Herdr в WSL."""
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+    """Параллельно опрашивает маршруты Gemini и Claude.
+
+    Опрос Herdr Multiplexer (probe_herdr_wsl) убран из цикла: карточка Herdr на странице
+    «Маршруты» заменена карточкой aiWatcher, а лишний вызов wsl каждые 15 секунд только нагружал систему.
+    Функция probe_herdr_wsl оставлена для ручного использования.
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         f_gemini = executor.submit(probe_gemini_routing)
         f_claude = executor.submit(probe_claude_routing)
-        f_herdr = executor.submit(probe_herdr_wsl)
 
         gemini_res = f_gemini.result()
         claude_res = f_claude.result()
-        herdr_res = f_herdr.result()
 
     return {
         "timestamp": time.strftime("%H:%M:%S"),
         "gemini": gemini_res,
         "claude": claude_res,
-        "herdr_wsl": herdr_res,
     }

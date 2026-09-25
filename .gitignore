@@ -46,3 +46,7 @@ strategy_history.json
 
 # Nested redundant project folders if any
 herdrControlGui/
+
+# Local runtime state (personal data / machine-specific)
+.herdr_vault_meta.json
+watchdog_config.json
