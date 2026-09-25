@@ -87,4 +87,5 @@ with token_vault_manager.auto_unlock_context():
 5. **Ремонт базы AionUi:** скрипты `aionUi_helper` ставят флаг `~/.aionui-web/.maintenance`, и сторож на это время AionUi не трогает.
 6. **Старый отдельный aiWatcher:** если он запущен, встроенный на паузе. Кнопка «Остановить внешний aiWatcher» завершает его и отключает его автозапуск (`ai_watcher_autorun.vbs` → `.disabled`).
 6а. **Экран входа AionUi «Connection failed»:** сторож проверяет `/api/auth/status` и при 502 сам делает чистый перезапуск (не чаще раза в 10 мин). Если не помогло — кнопка «🛠 Починить базу AionUi», затем «♻ Перезапустить AionUi (чисто)». Причины: `docs/AIWATCHER.md`, раздел 2а.
+6б. **OmniRoute «Server is unreachable» / «Failed to fetch»:** сторож проверяет порт 20128 и запускает `omniroute serve --no-open` в tmux-сессии `omniroute`. Старые команды `ps aux | grep '[o]mniroute'` и `omniroute start` в `watchdog_config.json` заменяются автоматически: первая давала ложное «живой», вторая в OmniRoute v3.8+ не работает. Разбор: `docs/AIWATCHER.md`, раздел 2б.
 7. **Тесты:** `python -m pytest test_watchdog_manager.py test_aiwatcher_card.py test_ui_command_refs.py test_app_ui.py -q`.

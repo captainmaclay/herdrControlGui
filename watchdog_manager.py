@@ -52,6 +52,19 @@ AIONUI_START_CMD = (
     "/home/f/.local/bin/aionui-web start --no-open --port 25808"
 )
 
+# OmniRoute (v3.8+): команды `omniroute start` больше нет — только `omniroute serve` (или просто `omniroute`).
+# Живость — по ответу порта 20128: `ps aux | grep '[o]mniroute'` ловил любой процесс со словом «omniroute»
+# в командной строке (tail логов, sqlite3 ~/.omniroute/..., агенты), и упавший шлюз считался живым.
+# Запуск — в tmux, как AionUi: `nohup` не спасает, Node сам ловит SIGHUP и завершается при закрытии сессии WSL.
+OMNIROUTE_CHECK_CMD = (
+    "c=$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:20128/); "
+    "[ \"$c\" != 000 ]"
+)
+OMNIROUTE_START_CMD = (
+    "tmux kill-session -t omniroute 2>/dev/null; "
+    "tmux new -d -s omniroute bash -lc 'omniroute serve --no-open'"
+)
+
 HELPER_SCRIPTS = "/mnt/d/My files/aionUi_helper/scripts"
 # «Здоровье» AionUi: процесс может жить, но отвечать 502 на /api/auth/status — тогда в браузере
 # экран входа «Connection failed, please try again» (прокси в окружении или повисший бэкенд на битой базе).
@@ -75,8 +88,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "apps": {
         "omniroute": {
             "enabled": True,
-            "check_cmd": "ps aux | grep '[o]mniroute'",
-            "start_cmd": "nohup omniroute start > /dev/null 2>&1 &",
+            "check_cmd": OMNIROUTE_CHECK_CMD,
+            "start_cmd": OMNIROUTE_START_CMD,
         },
         "aionui": {
             "enabled": True,
@@ -190,8 +203,13 @@ def disable_legacy_autorun(path: Path = LEGACY_AUTORUN) -> bool:
 # ─────────────────────────── Конфигурация ───────────────────────────
 
 def _upgrade_app(name: str, app: dict) -> dict:
-    """Старые команды aiWatcher для AionUi заменяются безопасными (флаг обслуживания, порт, без прокси)."""
+    """Старые команды aiWatcher заменяются безопасными (флаг обслуживания, порт, без прокси, tmux)."""
     app = dict(app)
+    if name == "omniroute":
+        if "20128" not in app.get("check_cmd", ""):
+            app["check_cmd"] = OMNIROUTE_CHECK_CMD
+        if "omniroute start" in app.get("start_cmd", "") or "tmux" not in app.get("start_cmd", ""):
+            app["start_cmd"] = OMNIROUTE_START_CMD
     if name == "aionui":
         if ".maintenance" not in app.get("check_cmd", ""):
             app["check_cmd"] = AIONUI_CHECK_CMD

@@ -11,7 +11,7 @@
 
 | Сервис | Порт | Проверка (`check_cmd`) | Запуск (`start_cmd`) |
 | :--- | :-: | :--- | :--- |
-| **OmniRoute** — шлюз к моделям | 20128 | `ps aux \| grep '[o]mniroute'` | `nohup omniroute start > /dev/null 2>&1 &` |
+| **OmniRoute** — шлюз к моделям | 20128 | ответ `http://127.0.0.1:20128/` (любой HTTP-код, кроме `000`) | `tmux new -d -s omniroute bash -lc 'omniroute serve --no-open'` (старая сессия `omniroute` перед этим закрывается) |
 | **AionUi** — веб-интерфейс и бэкенд `aioncore` | 25808 | пропуск при свежем флаге `~/.aionui-web/.maintenance`, иначе ответ `http://127.0.0.1:25808/` | `tmux new -d -s aionui env -u HTTP_PROXY -u http_proxy -u HTTPS_PROXY -u https_proxy -u ALL_PROXY -u all_proxy NO_PROXY='*' no_proxy='*' /home/f/.local/bin/aionui-web start --no-open --port 25808` |
 
 Команды выполняются через `wsl.exe bash -lc "<команда>"` без окна консоли.
@@ -75,6 +75,34 @@
 3. Если после этого статус AionUi не «🟢 РАБОТАЕТ», нажать **♻ Перезапустить AionUi (чисто)**.
 4. В браузере открыть `http://localhost:25808` и нажать **Ctrl+F5**.
 
+
+---
+
+## 2б. Почему OmniRoute лежал, а сторож показывал «работает» (25.09.2026)
+
+**Симптом.** Дашборд `http://localhost:20128/dashboard/...` показывает жёлтую плашку **«Server is unreachable. Reconnecting...»** и **«Error Short: Failed to fetch»**. Порт 20128 не слушается ни в WSL, ни в Windows, а в карточке aiWatcher у OmniRoute статус «🟢 РАБОТАЕТ».
+
+**Цепочка причин:**
+
+1. **03:09 — OmniRoute завершился по SIGHUP** (`~/.omniroute/logs/application/app.log`: `[Shutdown] Received SIGHUP ... Bye.`): закрылась сессия WSL или терминал, из которого он был запущен. `nohup` не помогает: Node ставит свой обработчик SIGHUP поверх «игнорировать», и OmniRoute штатно выключается.
+2. **Проверка сторожа давала ложное «живой».** `ps aux | grep '[o]mniroute'` совпадает с *любым* процессом, в командной строке которого есть слово `omniroute`: `tail -f ~/.omniroute/...`, `sqlite3 ~/.omniroute/storage.sqlite`, команды агентов и скиллов. Сервера нет, а проверка успешна.
+3. **Команда запуска сломана с OmniRoute v3.8.** Подкоманды `start` больше нет: `omniroute start` завершается ошибкой `too many arguments for 'serve'. Expected 0 arguments but got 1: start.` Из-за `nohup ... &` команда всё равно возвращала код 0, и в журнале было «Successfully sent start command», хотя сервер не поднимался.
+
+**Исправление (`watchdog_manager.py`):**
+
+- `check_cmd` = `OMNIROUTE_CHECK_CMD`: живость проверяется по ответу порта 20128, а не по имени процесса;
+- `start_cmd` = `OMNIROUTE_START_CMD`: `tmux new -d -s omniroute bash -lc 'omniroute serve --no-open'`. Сессия tmux переживает закрытие окна WSL, как у AionUi;
+- `_upgrade_app` при загрузке автоматически заменяет старые команды OmniRoute (`ps aux | grep`, `omniroute start`, запуск без tmux) в `watchdog_config.json`.
+
+**Ручная проверка и запуск в WSL:**
+
+```bash
+curl --noproxy '*' -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:20128/   # 000 = лежит
+tmux kill-session -t omniroute 2>/dev/null; tmux new -d -s omniroute bash -lc 'omniroute serve --no-open'
+tmux attach -t omniroute    # посмотреть вывод сервера (выход: Ctrl+B, D)
+```
+
+Если после запуска порт так и не отвечает, выполнить `omniroute serve --no-open` в терминале и прочитать ошибку. Логи лежат в `~/.omniroute/logs/application/app.log` и `~/.omniroute/server.log`.
 ---
 
 ## 3. Настройки: `watchdog_config.json`
