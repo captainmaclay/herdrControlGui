@@ -255,7 +255,6 @@ def create_encrypted_backup(
             ".env",
             "strategy_history.json",
             "integrations.log",
-            ".herdr_vault_meta.json",
         ]
         for fn in win_files:
             fp = BASE_DIR / fn
@@ -263,7 +262,7 @@ def create_encrypted_backup(
                 zf.write(fp, arcname=f"win/{fn}")
                 files_packed += 1
 
-        # 1.2 Файлы Claude Code (Windows)
+        # 1.2 Файлы узлов Type-B (Windows)
         if WIN_CLAUDE_DIR.exists():
             for fn in [".credentials.json", "settings.json"]:
                 fp = WIN_CLAUDE_DIR / fn
@@ -275,7 +274,7 @@ def create_encrypted_backup(
                     zf.write(bak, arcname=f"claude/win/{bak.name}")
                     files_packed += 1
 
-        # 1.3 Файлы Claude Code (WSL2)
+        # 1.3 Файлы узлов Type-B (WSL2)
         if WSL_CLAUDE_DIR.exists():
             for fn in [".credentials.json", "settings.json"]:
                 fp = WSL_CLAUDE_DIR / fn
@@ -287,7 +286,7 @@ def create_encrypted_backup(
                     zf.write(bak, arcname=f"claude/wsl/{bak.name}")
                     files_packed += 1
 
-            # Профили Claude OAuth (~/.claude/oauth-profiles/<имя>/): только токены и метаданные
+            # Профили сессий Type-B: только токены и метаданные
             oauth_dir = WSL_CLAUDE_DIR / CLAUDE_OAUTH_PROFILES_DIRNAME
             if oauth_dir.exists():
                 for prof_dir in sorted(p for p in oauth_dir.iterdir() if p.is_dir()):
@@ -326,7 +325,7 @@ def create_encrypted_backup(
                     except Exception:
                         pass
 
-        # 1.6 Файлы WSL Gemini (~/.gemini/)
+        # 1.6 Файлы сессий Type-A в WSL
         if WSL_GEMINI_DIR.exists():
             for root, dirs, files in os.walk(WSL_GEMINI_DIR):
                 root_path = Path(root)
@@ -489,7 +488,7 @@ def restore_encrypted_backup(
         except Exception:
             pass
 
-        # Синхронизация восстановленных настроек Claude Code и Killswitch
+        # Синхронизация восстановленных настроек узлов Type-B и Killswitch
         try:
             import claude_manager
             claude_manager.sync_after_restore()
@@ -598,13 +597,13 @@ def wipe_all_data() -> tuple[bool, str]:
     # 2. Очистка WSL токенов, профилей и метаданных
     import token_meta_cache
     
-    # 2.1 Gemini
+    # 2.1 Профили Type-A
     try:
         profiles_dir = WSL_GEMINI_DIR / "profiles"
         if profiles_dir.exists():
             import shutil
             shutil.rmtree(str(profiles_dir), ignore_errors=True)
-            cleared_items.append("Gemini Аккаунты")
+            cleared_items.append("Профили Type-A")
 
         cli_dir = WSL_GEMINI_DIR / "antigravity-cli"
         if cli_dir.exists():
@@ -617,16 +616,16 @@ def wipe_all_data() -> tuple[bool, str]:
                     except Exception:
                         pass
     except Exception as e:
-        errors.append(f"Gemini: {e}")
+        errors.append(f"Type-A: {e}")
 
-    # 2.2 Claude
+    # 2.2 Профили Type-B
     try:
         if WSL_CLAUDE_DIR.exists():
             import shutil
             shutil.rmtree(str(WSL_CLAUDE_DIR), ignore_errors=True)
-            cleared_items.append("Claude Аккаунты")
+            cleared_items.append("Профили Type-B")
     except Exception as e:
-        errors.append(f"Claude: {e}")
+        errors.append(f"Type-B: {e}")
 
     # 2.3 Метаданные хранилища
     try:

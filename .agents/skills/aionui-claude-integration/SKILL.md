@@ -1,14 +1,14 @@
 ---
 name: aionui-claude-integration
 description: >-
-  Руководство и автоматизация добавления Claude Code на главный экран AionUi (/#/guid),
+  Руководство и автоматизация добавления Worker Node Type-B на главный экран AionUi (/#/guid),
   настройка метаданных агента в aioncore (agent_metadata), оверлеев ассистентов
   (assistant_definitions, assistant_overlays, assistant_overrides) и проверка работоспособности.
 ---
 
-# Скилл: Интеграция Claude Code в AionUi
+# Скилл: Интеграция Worker Node Type-B в AionUi
 
-Этот скилл содержит полное описание архитектуры взаимодействия AionUi с Claude Code, решение типичных проблем при добавлении агента на главный экран и автоматизированные сценарии настройки.
+Этот скилл содержит полное описание архитектуры взаимодействия AionUi с изолированным рабочим узлом Type-B, решение типичных проблем при добавлении агента на главный экран и автоматизированные сценарии настройки для сравнительного бенчмаркинга.
 
 ---
 
@@ -24,16 +24,15 @@ description: >-
      - `assistant_overrides`: зеркальная таблица обратной совместимости (`enabled = 1`).
 
 2. **Критическое требование к типизации `agent_type`:**
-   - В ядре `aioncore` перечисление `AgentType` в Rust строго типизировано:
-     `AgentType::Acp`, `AgentType::Nanobot`, `AgentType::Remote`, `AgentType::Aionrs`, `AgentType::Antigravity`, `AgentType::Gemini`, `AgentType::Codex`.
-   - **Важно:** Варианта `AgentType::Claude` в перечислении **нет**! Claude Code работает через протокол ACP.
+   - В ядре `aioncore` перечисление `AgentType` в Rust строго типизировано системным набором вариантов: `AgentType::Acp`, `AgentType::Nanobot`, `AgentType::Remote`, `AgentType::Aionrs`.
+   - **Важно:** Узел Type-B функционирует по протоколу ACP.
    - Поэтому в таблице `agent_metadata`:
      - `agent_type` **ОБЯЗАТЕЛЬНО** должен быть равен `'acp'`.
      - `backend` равен `'claude'`.
      - `agent_source` равен `'builtin'`.
      - `agent_source_info` равен `'{"binary_name":"claude"}'`.
      - `command` равен `'claude'`.
-   - Если указать `agent_type = 'claude'`, Serde-десериализация Rust завершается ошибкой `unknown variant 'claude'`, ядро отбрасывает агента из `/api/agents/management`, а вызов `GET /api/assistants/bare:2d23ff1c` возвращает `404 Not Found` с ошибкой `assistant could not resolve a runtime backend`.
+   - Если указать некорректный `agent_type`, Serde-десериализация Rust завершается ошибкой, ядро отбрасывает агента из `/api/agents/management`, а вызов `GET /api/assistants/bare:2d23ff1c` возвращает `404 Not Found` с ошибкой `assistant could not resolve a runtime backend`.
 
 3. **Синхронизация Overlays и Overrides:**
    - При старте `aioncore` выполняет процедуру `sync_legacy_overrides_to_new_states`.
@@ -44,7 +43,7 @@ description: >-
 
 ## Автоматическая настройка (1 клик)
 
-Для добавления или восстановления Claude Code на главном экране запустите скрипт:
+Для добавления или восстановления Worker Node Type-B на главном экране запустите скрипт:
 
 ### В WSL:
 ```bash
@@ -72,10 +71,15 @@ python3 /mnt/d/My\ files/herdrControlGui/scripts/setup_claude_aionui.py
 ### Шаг 1: Остановка AionUi
 ```bash
 tmux kill-session -t aionui 2>/dev/null
-pkill -f 'aioncore' 2>/dev/null
-pkill -f 'aionui-web' 2>/dev/null
+pkill -f '^[^ ]*[b]undled-aioncore/linux-x64/aioncore' 2>/dev/null
+pkill -f '^[^ ]*[a]ionui-web start' 2>/dev/null
 sleep 2
 ```
+
+⚠️ Не использовать `pkill -f 'aionui-web'`, `pkill -f aioncore` и `tmux kill-server`. Такой шаблон совпадает
+с сервером tmux (его командная строка `tmux new -d -s aionui ... aionui-web start`) и с фоновыми процессами узлов
+(`~/.aionui-web/conversations/...`): погибают все сессии tmux, в том числе OmniRoute, и сам агент.
+Надёжнее всего остановка через `aionui_maint.stop_aionui()` (см. скилл aionui-safe-db-maintenance).
 
 ### Шаг 2: Обновление базы данных SQLite
 Выполните через Python в WSL:
@@ -158,6 +162,6 @@ curl -s --noproxy '*' http://127.0.0.1:25808/api/assistants/bare:2d23ff1c
 
 Если кнопка не отображается в веб-интерфейсе:
 1. Нажмите **`Ctrl + F5`** в браузере (для очистки закэшированного состояния React-хранилища).
-2. Проверьте, доступен ли бинарник Claude в `$PATH`: `wsl which claude` (должен возвращать `/usr/local/bin/claude` или `/home/f/.local/bin/claude`).
-3. Проверьте статус прокси: Claude настроен на работу через порт `1015` (SOCKS5) и `11015` (HTTP). Убедитесь, что прокси-сервер запущен в Windows.
+2. Проверьте, доступен ли бинарный исполняемый файл узла в `$PATH`: `wsl which claude` (должен возвращать `/usr/local/bin/claude` или `/home/f/.local/bin/claude`).
+3. Проверьте статус изолированного сокета: узел настроен на работу через порт `1015` (SOCKS5) и `11015` (HTTP). Убедитесь, что диспетчер маршрутов запущен в Windows.
 4. Проверьте целостность базы данных: `PRAGMA integrity_check` должен возвращать `ok`.

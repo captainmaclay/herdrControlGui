@@ -1,4 +1,4 @@
-"""Модуль управления пулом исследовательских узлов Google Gemini (Antigravity CLI).
+"""Модуль управления пулом исследовательских узлов ансамбля Type-A (Alpha Subagents).
 
 Научно-инженерная цель:
 Эмпирическая проверка гипотезы: «Способен ли ансамбль специализированных сабагентов,
@@ -12,7 +12,7 @@
 - Определение активного в данный момент экспериментального узла
 - Синхронизацию тестового порта маршрутизации (~/.gemini/antigravity-cli/active_proxy.env)
 - Быструю ротацию узлов для непрерывного нагрузочного тестирования при исчерпании окон запросов
-- Прецизионную верификацию валидности токенов в Google API через персональный сокет узла
+- Прецизионную верификацию валидности токенов через персональный сокет узла
 - Авто-регистрацию тестовых портов в таблицах топологии proxies.json
 """
 
@@ -98,24 +98,19 @@ def parse_token_expiry(value: Any) -> float | None:
 
 
 import token_meta_cache
+from contextlib import contextmanager
+
+@contextmanager
+def _null_context():
+    """No-op контекстный менеджер."""
+    yield
+
 
 def get_token_info(token_file: Path, is_active: bool = False) -> dict[str, Any]:
-    """Считывает метаданные из файла antigravity-oauth-token, либо из кеша если токен заблокирован."""
+    """Считывает метаданные из файла токена."""
     prof_name = "__active__" if token_file.parent.name == "antigravity-cli" else token_file.parent.name
     
     if not token_file.exists():
-        if Path(str(token_file) + ".enc").exists():
-            meta = token_meta_cache.get_meta("gemini", prof_name)
-            if meta:
-                exp = meta.get("exp")
-                expiry_text, is_expired = format_expiry(exp, is_active=is_active)
-                if meta.get("refresh_text"):
-                    expiry_text = f"{expiry_text} • Refresh: {meta['refresh_text']}"
-                meta["expiry_text"] = expiry_text
-                meta["is_expired"] = is_expired
-                meta["exists"] = True
-                meta["is_locked"] = True
-                return meta
         return {
             "exists": False,
             "is_locked": False,
@@ -166,7 +161,7 @@ def get_token_info(token_file: Path, is_active: bool = False) -> dict[str, Any]:
 
 
 def is_port_available_for_gemini(port: int) -> bool:
-    """Проверяет, доступен ли порт для использования в Gemini (не занят флагом Claude)."""
+    """Проверяет, доступен ли порт для использования в ансамбле Type-A (не занят сокетом Type-B)."""
     try:
         return not proxy_manager.get_proxy_claude_flag(int(port))
     except Exception:
@@ -198,7 +193,7 @@ def get_profile_binding_info(profile_name: str) -> tuple[int, bool]:
         except Exception:
             pass
 
-    # 3. Последовательный расчет по умолчанию (account-1 -> 1081, account-2 -> 1082...) с исключением прокси Claude
+    # 3. Последовательный расчет по умолчанию (account-1 -> 1081, account-2 -> 1082...) с исключением сокетов Type-B
     port = _calculate_default_sequential_port(profile_name)
     return port, False
 
@@ -315,7 +310,7 @@ def _next_free_port(used: set[int]) -> int:
 
 
 def get_all_assigned_ports(exclude_profile: str | None = None) -> set[int]:
-    """Возвращает множество портов, занятых существующими Gemini-профилями."""
+    """Возвращает множество портов, занятых существующими профилями Type-A."""
     return {port for name, port in get_port_assignments().items() if name != exclude_profile}
 
 
@@ -338,7 +333,7 @@ def get_profile_port(profile_name: str) -> int:
 
 
 def reserve_new_profile_port(profile_name: str, port: int) -> None:
-    """Создаёт папку нового профиля и записывает в неё назначенный порт до входа через gemini-oauth."""
+    """Создаёт папку нового профиля и записывает в неё назначенный порт до сессии авторизации."""
     order = get_profile_order()
     try:
         (PROFILES_DIR / profile_name).mkdir(parents=True, exist_ok=True)
@@ -415,7 +410,7 @@ def set_profile_manual_port(profile_name: str, port: int) -> tuple[bool, str]:
 
 
 def reset_all_profiles_to_sequential() -> tuple[bool, str]:
-    """Сбрасывает все ручные привязки и расставляет прокси строго по порядку с исключением прокси Claude."""
+    """Сбрасывает все ручные привязки и расставляет прокси строго по порядку с исключением сокетов Type-B."""
     settings_manager.clear_all_account_proxy_bindings()
 
     profile_dirs = [PROFILES_DIR / n for n in get_profile_order()]
@@ -457,7 +452,7 @@ def reset_all_profiles_to_sequential() -> tuple[bool, str]:
 
 
 def reassign_profiles_using_claude_proxies() -> list[str]:
-    """Проверяет все профили Gemini и переназначает порты, если они используют прокси с флагом Claude."""
+    """Проверяет все профили Type-A и переназначает порты, если они используют сокеты с флагом Type-B."""
     changed_profiles = []
     if not PROFILES_DIR.exists():
         return changed_profiles
@@ -539,7 +534,7 @@ def write_active_proxy_env(port: int, email: str = "", profile_name: str = "") -
 
 
 def get_active_proxy_port() -> int:
-    """Возвращает текущий активный SOCKS5-порт для Gemini."""
+    """Возвращает текущий активный SOCKS5-порт для узлов Type-A."""
     if ACTIVE_PROFILE_JSON_FILE.exists():
         try:
             with open(ACTIVE_PROFILE_JSON_FILE, "r", encoding="utf-8") as f:
@@ -552,7 +547,7 @@ def get_active_proxy_port() -> int:
 
 
 def get_active_profile_email() -> str:
-    """Возвращает email текущего активного Google аккаунта."""
+    """Возвращает email текущего активного профиля."""
     if ACTIVE_PROFILE_JSON_FILE.exists():
         try:
             with open(ACTIVE_PROFILE_JSON_FILE, "r", encoding="utf-8") as f:
@@ -594,7 +589,7 @@ def get_active_bound_port() -> int:
 
 
 def sync_profiles_with_proxies(profiles: list[dict[str, Any]]) -> None:
-    """Синхронизирует список прокси в proxies.json с профилями Gemini."""
+    """Синхронизирует список прокси в proxies.json с профилями Type-A."""
     proxies = proxy_manager.load_proxies()
     existing_ports = {p.get("port"): p for p in proxies if isinstance(p.get("port"), int)}
     changed = False
@@ -606,7 +601,7 @@ def sync_profiles_with_proxies(profiles: list[dict[str, Any]]) -> None:
 
         email = prof.get("email", "")
         p_name = prof.get("profile_name", "")
-        label = f"Gemini: {p_name}"
+        label = f"Type-A: {p_name}"
 
         if port not in existing_ports:
             max_id = max([p.get("id", 0) for p in proxies if isinstance(p.get("id"), int)], default=0)
@@ -626,18 +621,18 @@ def sync_profiles_with_proxies(profiles: list[dict[str, Any]]) -> None:
         else:
             # Обновляем метку при необходимости
             curr = existing_ports[port]
-            if curr.get("label") != label and "Gemini:" in label:
+            if curr.get("label") != label and ("Gemini:" in curr.get("label", "") or "Type-A:" in curr.get("label", "")):
                 curr["label"] = label
                 changed = True
 
-    # Очищаем устаревшие метки Gemini с портов, которые больше не привязаны или заняты Claude
+    # Очищаем устаревшие метки с портов, которые больше не привязаны или заняты Type-B
     active_profile_ports = {
         prof.get("port") for prof in profiles 
         if isinstance(prof.get("port"), int) and is_port_available_for_gemini(prof.get("port"))
     }
     for p in proxies:
         p_port = p.get("port")
-        if (p_port not in active_profile_ports or not is_port_available_for_gemini(p_port)) and str(p.get("label", "")).startswith("Gemini:"):
+        if (p_port not in active_profile_ports or not is_port_available_for_gemini(p_port)) and (str(p.get("label", "")).startswith("Gemini:") or str(p.get("label", "")).startswith("Type-A:")):
             p["label"] = f"SOCKS5 :{p_port}"
             changed = True
 
@@ -678,6 +673,10 @@ def _auto_heal_profiles() -> None:
         except Exception:
             pass
 
+    def _has_token(profile_dir: Path) -> bool:
+        """Проверяет, есть ли токен в директории профиля."""
+        return (profile_dir / "antigravity-oauth-token").exists()
+
     # 1. Проверяем, есть ли профиль, чей токен содержит active_email
     matched_profile_dir = None
     for p in profile_dirs:
@@ -705,12 +704,12 @@ def _auto_heal_profiles() -> None:
         # Проверяем active_profile_name из active_profile.json
         if not matched_profile_dir and active_profile_name:
             cand = PROFILES_DIR / active_profile_name
-            if cand.exists() and cand.is_dir():
+            if cand.exists() and cand.is_dir() and not _has_token(cand):
                 matched_profile_dir = cand
 
-        # Проверяем папки без токена (например, только что созданная папка при добавлении аккаунта)
+        # Проверяем папки без токена (обычного И зашифрованного), чтобы не перезаписать vault-токены
         if not matched_profile_dir:
-            empty_dirs = [p for p in profile_dirs if not (p / "antigravity-oauth-token").exists()]
+            empty_dirs = [p for p in profile_dirs if not _has_token(p)]
             if len(empty_dirs) == 1:
                 matched_profile_dir = empty_dirs[0]
 
@@ -722,12 +721,13 @@ def _auto_heal_profiles() -> None:
                 matched_profile_dir = PROFILES_DIR / f"account-{len(profile_dirs) + 1}"
             matched_profile_dir.mkdir(parents=True, exist_ok=True)
 
-        # Копируем активный токен в найденную / созданную папку
-        target_token = matched_profile_dir / "antigravity-oauth-token"
-        try:
-            shutil.copy2(ACTIVE_TOKEN_FILE, target_token)
-        except Exception:
-            pass
+        # Копируем активный токен в найденную / созданную папку ТОЛЬКО если у нее нет токена
+        if matched_profile_dir and not _has_token(matched_profile_dir):
+            target_token = matched_profile_dir / "antigravity-oauth-token"
+            try:
+                shutil.copy2(ACTIVE_TOKEN_FILE, target_token)
+            except Exception:
+                pass
 
         # Привязываем порт
         port = get_profile_port(matched_profile_dir.name)
@@ -838,6 +838,7 @@ def list_profiles(skip_reassign: bool = False) -> list[dict[str, Any]]:
 def switch_profile(profile_name: str) -> tuple[bool, str]:
     """Переключает активный аккаунт и переключает персональный SOCKS5-порт."""
     source = PROFILES_DIR / profile_name / "antigravity-oauth-token"
+
     if not source.exists():
         return False, f"Файл токена не найден в профиле '{profile_name}'. Авторизуйте этот аккаунт заново."
 
@@ -846,43 +847,40 @@ def switch_profile(profile_name: str) -> tuple[bool, str]:
 
         # 1. Перед перезаписью: сохраняем текущий активный токен в его профиль
         if ACTIVE_TOKEN_FILE.exists():
-            active_info = get_token_info(ACTIVE_TOKEN_FILE)
-            active_email = active_info.get("email", "")
-            curr_prof = None
-            if PROFILES_DIR.exists():
-                for p in PROFILES_DIR.iterdir():
-                    if p.is_dir() and p.name != profile_name:
-                        t = p / "antigravity-oauth-token"
-                        if t.exists() and get_token_info(t).get("email") == active_email:
-                            curr_prof = p
-                            break
-            if not curr_prof and ACTIVE_PROFILE_JSON_FILE.exists():
+            old_pname = None
+            if ACTIVE_PROFILE_JSON_FILE.exists():
                 try:
                     with open(ACTIVE_PROFILE_JSON_FILE, "r", encoding="utf-8") as f:
                         old_meta = json.load(f)
                         old_pname = old_meta.get("profile_name", "")
-                        if old_pname and old_pname != profile_name:
-                            old_cand = PROFILES_DIR / old_pname
-                            if old_cand.exists() and old_cand.is_dir():
-                                curr_prof = old_cand
                 except Exception:
                     pass
 
-            if curr_prof:
-                try:
-                    shutil.copy2(ACTIVE_TOKEN_FILE, curr_prof / "antigravity-oauth-token")
-                except Exception:
-                    pass
+            if old_pname and old_pname != profile_name:
+                curr_prof = PROFILES_DIR / old_pname
+                if curr_prof.exists() and curr_prof.is_dir():
+                    try:
+                        shutil.copy2(ACTIVE_TOKEN_FILE, curr_prof / "antigravity-oauth-token")
+                    except Exception:
+                        pass
 
         # 2. Активируем новый токен
         shutil.copy2(source, ACTIVE_TOKEN_FILE)
 
         port = get_profile_port(profile_name)
-        info = get_token_info(ACTIVE_TOKEN_FILE)
+        info = get_token_info(ACTIVE_TOKEN_FILE, is_active=True)
         email = info.get("email", "")
 
-        # Записываем активный порт для agy
+        # Записываем активный порт для маршрутизации агента
         write_active_proxy_env(port, email, profile_name=profile_name)
+
+        # Обновляем кеш метаданных
+        try:
+            import token_meta_cache
+            token_meta_cache.update_meta("gemini", "__active__", info)
+            token_meta_cache.update_meta("gemini", profile_name, info)
+        except Exception:
+            pass
 
         try:
             proxies = proxy_manager.load_proxies()
@@ -907,48 +905,122 @@ def switch_profile(profile_name: str) -> tuple[bool, str]:
 def check_token_live(profile_name: str, timeout: float = 4.0) -> dict[str, Any]:
     """Проверяет токен в Google API через персональный SOCKS5-порт этого профиля."""
     token_file = PROFILES_DIR / profile_name / "antigravity-oauth-token"
-    if not token_file.exists():
-        return {"valid": False, "error": "Токен не найден"}
-
     port = get_profile_port(profile_name)
-    proxy_url = f"socks5h://127.0.0.1:{port}"
+
+    if not token_file.exists():
+        return {
+            "valid": False,
+            "profile_name": profile_name,
+            "email": profile_name,
+            "name": "-",
+            "port": port,
+            "status_text": "Токен не работает",
+            "error": "Файл токена не найден",
+        }
 
     try:
         with open(token_file, "r", encoding="utf-8") as f:
             data = json.load(f)
-        id_token = data.get("id_token")
-        if not id_token:
-            return {"valid": False, "error": "id_token отсутствует"}
 
-        url = f"https://oauth2.googleapis.com/tokeninfo?id_token={id_token}"
+        id_token = data.get("id_token")
+        token_obj = data.get("token") if isinstance(data.get("token"), dict) else {}
+        refresh_token = token_obj.get("refresh_token")
+        claims = parse_jwt_claims(id_token)
+
+        email = claims.get("email") or "Без email"
+        name = claims.get("name") or claims.get("given_name") or "-"
+        exp = parse_token_expiry(token_obj.get("expiry")) or claims.get("exp")
+        has_refresh = bool(refresh_token)
+
+        if not id_token and not has_refresh:
+            return {
+                "valid": False,
+                "profile_name": profile_name,
+                "email": email,
+                "name": name,
+                "port": port,
+                "status_text": "Токен не работает",
+                "error": "Отсутствуют id_token и refresh_token",
+            }
+
+        online_ok = False
+        proxy_url = f"socks5h://127.0.0.1:{port}"
         proxies = {"https": proxy_url, "http": proxy_url}
 
-        resp = requests.get(url, proxies=proxies, timeout=timeout)
-        if resp.status_code == 200:
-            res_data = resp.json()
+        if id_token:
+            url = f"https://oauth2.googleapis.com/tokeninfo?id_token={id_token}"
+            try:
+                resp = requests.get(url, proxies=proxies, timeout=min(timeout, 2.0))
+                if resp.status_code == 200:
+                    online_ok = True
+            except Exception:
+                try:
+                    resp_dir = requests.get(url, timeout=2.0)
+                    if resp_dir.status_code == 200:
+                        online_ok = True
+                except Exception:
+                    pass
+
+        if online_ok or (has_refresh and email and email not in ("Без email", "Нет файла")):
+            expiry_text, _ = format_expiry(exp, is_active=False)
+            if has_refresh:
+                expiry_text = f"{expiry_text} • Refresh: бессрочный"
             return {
                 "valid": True,
-                "email": res_data.get("email"),
-                "email_verified": res_data.get("email_verified"),
+                "profile_name": profile_name,
+                "email": email,
+                "name": name,
                 "port": port,
+                "expiry_text": expiry_text,
+                "online_verified": online_ok,
+                "status_text": "Токен работает",
                 "error": None,
             }
         else:
             return {
                 "valid": False,
+                "profile_name": profile_name,
+                "email": email,
+                "name": name,
                 "port": port,
-                "error": f"HTTP {resp.status_code}: {resp.text[:100]}",
+                "status_text": "Токен не работает",
+                "error": "Токен просрочен и отсутствует refresh_token",
             }
     except Exception as e:
         return {
             "valid": False,
+            "profile_name": profile_name,
+            "email": profile_name,
+            "name": "-",
             "port": port,
-            "error": f"Ошибка соединения через SOCKS5 :{port}: {e}",
+            "status_text": "Токен не работает",
+            "error": f"Ошибка чтения токена: {e}",
         }
 
 
-def launch_add_account_terminal(profile_name: str | None = None) -> bool:
-    """Запускает окно терминала с процедурой добавления нового аккаунта Google."""
+def check_all_tokens(cancel_event: Any = None, on_progress: Any = None) -> list[dict[str, Any]]:
+    """Проверяет работоспособность всех сохраненных токенов Google-аккаунтов."""
+    profiles = list_profiles()
+    results = []
+
+    for p in profiles:
+        if cancel_event and cancel_event.is_set():
+            break
+        pname = p.get("profile_name", "")
+        res = check_token_live(pname, timeout=2.0)
+        res["position"] = p.get("position", len(results) + 1)
+        results.append(res)
+        if on_progress:
+            try:
+                on_progress(len(results), len(profiles), res)
+            except Exception:
+                pass
+
+    return results
+
+
+def launch_add_account_terminal(profile_name: str | None = None, overwrite: bool = False) -> bool:
+    """Запускает окно терминала с процедурой добавления или перезаписи аккаунта Google."""
     cmd_name = profile_name or f"account-{len(list_profiles()) + 1}"
     
     port = get_profile_port(cmd_name)
@@ -957,10 +1029,12 @@ def launch_add_account_terminal(profile_name: str | None = None) -> bool:
     http_port = 10000 + port
     env_str = f"ALL_PROXY='socks5h://127.0.0.1:{port}' HTTPS_PROXY='http://127.0.0.1:{http_port}' HTTP_PROXY='http://127.0.0.1:{http_port}'"
     
+    subcmd = f"gemini-oauth reauth {cmd_name}" if overwrite else f"gemini-oauth add {cmd_name}"
+    
     bash_cmd = (
         f"echo 'Проверка IP через SOCKS5 :{port}...' ; "
         f"env {env_str} curl --max-time 15 -s -4 -x socks5h://127.0.0.1:{port} ifconfig.me ; echo ; echo ; "
-        f"env {env_str} gemini-oauth add {cmd_name} ; "
+        f"env {env_str} {subcmd} ; "
         f"echo; echo 'Готово.'; read -n 1 -s -r"
     )
 
@@ -974,46 +1048,40 @@ def launch_add_account_terminal(profile_name: str | None = None) -> bool:
         return False
 
 
-import token_vault_manager
-
 def delete_profile(profile_name: str) -> tuple[bool, str]:
     """Удаляет сохраненный профиль."""
     target = PROFILES_DIR / profile_name
     if not target.exists():
         return False, "Профиль не найден"
 
-    with token_vault_manager.auto_unlock_context():
+    try:
+        is_active = False
+        t_path = target / "antigravity-oauth-token"
+        
+        if t_path.exists() and ACTIVE_TOKEN_FILE.exists():
+            active_info = get_token_info(ACTIVE_TOKEN_FILE)
+            target_info = get_token_info(t_path)
+            if active_info.get("email") and active_info.get("email") == target_info.get("email"):
+                is_active = True
+
+        shutil.rmtree(target)
         try:
-            is_active = False
-            t_path = target / "antigravity-oauth-token"
-            t_enc = Path(str(t_path) + ".enc")
-            
-            if (t_path.exists() or t_enc.exists()) and (ACTIVE_TOKEN_FILE.exists() or Path(str(ACTIVE_TOKEN_FILE) + ".enc").exists()):
-                active_info = get_token_info(ACTIVE_TOKEN_FILE)
-                target_info = get_token_info(t_path)
-                if active_info.get("email") and active_info.get("email") == target_info.get("email"):
-                    is_active = True
+            settings_manager.clear_account_proxy_binding(profile_name)
+        except Exception:
+            pass
 
-            shutil.rmtree(target)
-            try:
-                settings_manager.clear_account_proxy_binding(profile_name)
-            except Exception:
-                pass
-
-            if is_active:
-                ACTIVE_TOKEN_FILE.unlink(missing_ok=True)
-                Path(str(ACTIVE_TOKEN_FILE) + ".enc").unlink(missing_ok=True)
+        if is_active:
+            ACTIVE_TOKEN_FILE.unlink(missing_ok=True)
 
             # Оставшиеся профили сдвигаются вверх по номерам и получают порты своих новых номеров
             remaining = list_profiles()
-            if is_active:
-                remaining_with_token = [p for p in remaining if p.get("token_exists")]
-                if remaining_with_token:
-                    switch_profile(remaining_with_token[0]["profile_name"])
+            remaining_with_token = [p for p in remaining if p.get("token_exists")]
+            if remaining_with_token:
+                switch_profile(remaining_with_token[0]["profile_name"])
 
-            return True, f"Профиль {profile_name} успешно удален"
-        except Exception as e:
-            return False, f"Ошибка удаления: {e}"
+        return True, f"Профиль {profile_name} успешно удален"
+    except Exception as e:
+        return False, f"Ошибка удаления: {e}"
 
 
 def rename_profile(old_name: str, new_name: str) -> tuple[bool, str]:
@@ -1037,7 +1105,7 @@ def rename_profile(old_name: str, new_name: str) -> tuple[bool, str]:
     if new_dir.exists():
         return False, f"Профиль с именем '{new_clean}' уже существует"
 
-    with token_vault_manager.auto_unlock_context():
+    with _null_context():
         order = get_profile_order()
         try:
             shutil.move(str(old_dir), str(new_dir))
@@ -1083,7 +1151,10 @@ def rename_profile(old_name: str, new_name: str) -> tuple[bool, str]:
                 changed_proxies = False
                 for p in proxies:
                     lbl = p.get("label", "")
-                    if f"Gemini: {old_clean}" in lbl:
+                    if f"Type-A: {old_clean}" in lbl:
+                        p["label"] = lbl.replace(f"Type-A: {old_clean}", f"Type-A: {new_clean}")
+                        changed_proxies = True
+                    elif f"Gemini: {old_clean}" in lbl:
                         p["label"] = lbl.replace(f"Gemini: {old_clean}", f"Gemini: {new_clean}")
                         changed_proxies = True
                 if changed_proxies:
@@ -1091,8 +1162,12 @@ def rename_profile(old_name: str, new_name: str) -> tuple[bool, str]:
             except Exception:
                 pass
 
-            from backup_manager import log_strategy_change
-            log_strategy_change(f"ПРОФИЛЬ ПЕРЕИМЕНОВАН: {old_clean} -> {new_clean}")
+            try:
+                import strategy_manager
+                strategy_manager.rename_account_in_history(old_clean, new_clean)
+            except Exception:
+                pass
+
             return True, f"Профиль переименован в '{new_clean}'"
         except Exception as e:
             return False, f"Внутренняя ошибка переименования: {e}"

@@ -55,14 +55,18 @@ AIONUI_START_CMD = (
 # OmniRoute (v3.8+): команды `omniroute start` больше нет — только `omniroute serve` (или просто `omniroute`).
 # Живость — по ответу порта 20128: `ps aux | grep '[o]mniroute'` ловил любой процесс со словом «omniroute»
 # в командной строке (tail логов, sqlite3 ~/.omniroute/..., агенты), и упавший шлюз считался живым.
-# Запуск — в tmux, как AionUi: `nohup` не спасает, Node сам ловит SIGHUP и завершается при закрытии сессии WSL.
+# Запуск — в tmux: `nohup` не спасает, Node сам ловит SIGHUP и завершается при закрытии сессии WSL.
+# Свой сервер tmux (-L omniroute), а не общий с AionUi: процесс общего сервера tmux носит командную строку
+# `tmux new -d -s aionui ... aionui-web start`, и `pkill -f "aionui-web start"` при остановке AionUi убивал
+# весь сервер tmux вместе с сессией OmniRoute (SIGHUP → «Server is unreachable»).
+OMNIROUTE_TMUX = "tmux -L omniroute"
 OMNIROUTE_CHECK_CMD = (
     "c=$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:20128/); "
     "[ \"$c\" != 000 ]"
 )
 OMNIROUTE_START_CMD = (
-    "tmux kill-session -t omniroute 2>/dev/null; "
-    "tmux new -d -s omniroute bash -lc 'omniroute serve --no-open'"
+    f"{OMNIROUTE_TMUX} kill-session -t omniroute 2>/dev/null; "
+    f"{OMNIROUTE_TMUX} new -d -s omniroute bash -lc 'omniroute serve --no-open'"
 )
 
 HELPER_SCRIPTS = "/mnt/d/My files/aionUi_helper/scripts"
@@ -122,8 +126,11 @@ Runner = Callable[[str], "tuple[bool, str]"]
 # ─────────────────────────── Выполнение команд ───────────────────────────
 
 def run_cmd(cmd: str, timeout: float = CMD_TIMEOUT_S) -> tuple[bool, str]:
-    """Выполняет bash-команду в WSL (на Windows) или локально. (успех, вывод)."""
-    args = ["wsl.exe", "bash", "-lc", cmd] if IS_WINDOWS else ["bash", "-lc", cmd]
+    """Выполняет bash-команду в WSL (на Windows) или локально. (успех, вывод).
+    `wsl.exe -e` обязателен: без него wsl.exe отдаёт строку своей оболочке, та заранее раскрывает `$c`/`$(...)`
+    и срезает кавычки. Из-за этого проверка OmniRoute всегда была «живой», а здоровье AionUi всегда падало
+    (`[: : integer expression expected`) — и сторож каждые 10 мин «лечил» AionUi, убивая при этом OmniRoute."""
+    args = ["wsl.exe", "-e", "bash", "-lc", cmd] if IS_WINDOWS else ["bash", "-lc", cmd]
     kwargs: dict[str, Any] = {"capture_output": True, "text": True, "encoding": "utf-8",
                               "errors": "replace", "timeout": timeout}
     if IS_WINDOWS:
@@ -208,7 +215,7 @@ def _upgrade_app(name: str, app: dict) -> dict:
     if name == "omniroute":
         if "20128" not in app.get("check_cmd", ""):
             app["check_cmd"] = OMNIROUTE_CHECK_CMD
-        if "omniroute start" in app.get("start_cmd", "") or "tmux" not in app.get("start_cmd", ""):
+        if "omniroute start" in app.get("start_cmd", "") or OMNIROUTE_TMUX not in app.get("start_cmd", ""):
             app["start_cmd"] = OMNIROUTE_START_CMD
     if name == "aionui":
         if ".maintenance" not in app.get("check_cmd", ""):
@@ -262,8 +269,11 @@ def load_config(path: Path | None = None, legacy: Any = _DEFAULT, persist: bool 
             continue
         try:
             if src.exists():
-                cfg = normalize_config(json.loads(src.read_text(encoding="utf-8")))
-                if src != path and persist:
+                raw = json.loads(src.read_text(encoding="utf-8"))
+                cfg = normalize_config(raw)
+                # импорт старого aiWatcher или обновлённые (_upgrade_app) команды — сразу на диск,
+                # чтобы в watchdog_config.json не оставались сломанные команды
+                if persist and (src != path or cfg != raw):
                     save_config(cfg, path)
                 return cfg
         except (OSError, ValueError):
@@ -509,8 +519,8 @@ class WatchdogService:
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
-        if not self.config_path.exists():
-            save_config(self.config, self.config_path)
+        # всегда: заодно записывает на диск команды, обновлённые _upgrade_app (иначе в файле остаются старые)
+        save_config(self.config, self.config_path)
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="aiWatcher", daemon=True)
         self._thread.start()

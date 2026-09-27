@@ -15,6 +15,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 from unittest.mock import patch
 
 import watchdog_manager as wm
@@ -93,7 +94,27 @@ class TestConfig(TmpDirCase):
         self.assertNotIn("ps aux", om["check_cmd"])
         self.assertIn("omniroute serve", om["start_cmd"])
         self.assertNotIn("omniroute start", om["start_cmd"])
-        self.assertIn("tmux new -d -s omniroute", om["start_cmd"])
+        self.assertIn("tmux -L omniroute new -d -s omniroute", om["start_cmd"])
+
+    def test_run_cmd_uses_wsl_exec_on_windows(self):
+        """Без `wsl.exe -e` оболочка wsl.exe раскрывала $c заранее: ложное «живой» у OmniRoute."""
+        seen = {}
+        def fake_run(args, **kw):
+            seen["args"] = args
+            return subprocess.CompletedProcess(args, 0, "", "")
+        with mock.patch.object(wm, "IS_WINDOWS", True), mock.patch.object(wm.subprocess, "run", fake_run):
+            wm.run_cmd("true")
+        self.assertEqual(seen["args"][:4], ["wsl.exe", "-e", "bash", "-lc"])
+
+    def test_old_omniroute_cmds_are_upgraded_on_disk(self):
+        self.cfg_path.write_text(json.dumps({"apps": {"omniroute": {
+            "enabled": True, "check_cmd": "ps aux | grep '[o]mniroute'",
+            "start_cmd": "tmux new -d -s omniroute bash -lc 'omniroute serve --no-open'"}}}), encoding="utf-8")
+        cfg = wm.load_config(self.cfg_path, None)
+        self.assertEqual(cfg["apps"]["omniroute"]["start_cmd"], wm.OMNIROUTE_START_CMD)
+        saved = json.loads(self.cfg_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["apps"]["omniroute"]["check_cmd"], wm.OMNIROUTE_CHECK_CMD)
+        self.assertEqual(saved["apps"]["omniroute"]["start_cmd"], wm.OMNIROUTE_START_CMD)
 
     def test_default_start_cmd_strips_all_proxy_vars(self):
         cmd = wm.DEFAULT_CONFIG["apps"]["aionui"]["start_cmd"]

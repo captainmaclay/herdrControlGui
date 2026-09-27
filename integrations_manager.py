@@ -1,4 +1,4 @@
-"""Менеджер интеграций для исследовательского кластера Herdr (AionUi, OmniRoute, Claude Code, Gemini Cluster).
+"""Менеджер интеграций для исследовательского кластера Herdr (AionUi, OmniRoute, Type-B Nodes, Type-A Cluster).
 
 Научно-инженерная цель:
 Автоматизированная сборка и синхронизация топологии экспериментального стенда.
@@ -9,9 +9,9 @@
 1. Логирование хода бенчмарк-прогонов с миллисекундными метками в integrations.log
 2. Контроль размера журнала телеметрии (1 МБ, с автоматической ротацией)
 3. Просмотр и потоковую синхронизацию истории событий бенчмарка
-4. Комплексный мониторинг доступности рабочих узлов AionUi, OmniRoute, Claude и Gemini
-5. Калибровку и синхронизацию эталонного узла Claude Code
-6. Синхронизацию кластера Gemini (профили, изолированные порты 1081+, комбо-маршрут OmniRoute, БД AionUi)
+4. Комплексный мониторинг доступности рабочих узлов AionUi, OmniRoute, Type-B и Type-A
+5. Калибровку и синхронизацию эталонного узла Type-B
+6. Синхронизацию кластера Type-A (профили, изолированные порты 1081+, комбо-маршрут OmniRoute, БД AionUi)
 """
 
 from __future__ import annotations
@@ -37,7 +37,6 @@ TRIM_TARGET_BYTES = 512 * 1024    # До 512 КБ при ротации
 import aionui_claude_bridge
 import gemini_manager
 import settings_manager
-import token_vault_manager
 import backup_manager
 
 
@@ -169,7 +168,7 @@ def check_http_status(url: str, timeout: float = 1.0) -> tuple[bool, int, str]:
 
 
 def check_aionui_status(log_fn: Callable[[str, str], None] | None = None) -> dict[str, Any]:
-    """Комплексная проверка доступности AionUi, OmniRoute, Claude и Gemini."""
+    """Комплексная проверка доступности AionUi, OmniRoute, рабочих узлов Type-B и Type-A."""
     def _log(msg: str, lvl: str = "INFO"):
         logger.log(msg, lvl)
         if log_fn:
@@ -202,7 +201,7 @@ def check_aionui_status(log_fn: Callable[[str, str], None] | None = None) -> dic
     else:
         _log(f"OmniRoute Gateway: OFFLINE ({omni_msg}) на порту 20128", "WARN")
 
-    # 3. Claude Code & Прокси (:1015 / :11015)
+    # 3. Worker Node Type-B & Выделенный сокет (:1015 / :11015)
     c_socks_ok = check_port_accessible("127.0.0.1", 1015, timeout=0.5)
     c_http_ok = check_port_accessible("127.0.0.1", 11015, timeout=0.5)
     oauth_st = aionui_claude_bridge.get_oauth_status()
@@ -212,16 +211,16 @@ def check_aionui_status(log_fn: Callable[[str, str], None] | None = None) -> dic
         "oauth": oauth_st,
     }
     if c_socks_ok and c_http_ok:
-        _log("Claude Network: Сокеты SOCKS5 :1015 и HTTP :11015 активны", "SUCCESS")
+        _log("Type-B Network: Сокеты SOCKS5 :1015 и HTTP :11015 активны", "SUCCESS")
     else:
-        _log(f"Claude Network: Сокет 1015={c_socks_ok}, 11015={c_http_ok} (проверьте vless2socks)", "WARN")
+        _log(f"Type-B Network: Сокет 1015={c_socks_ok}, 11015={c_http_ok} (проверьте vless2socks)", "WARN")
 
     if oauth_st.get("authorized"):
-        _log(f"Claude Auth: Подписка {oauth_st.get('subscription_type', 'N/A').upper()} действительна ({oauth_st.get('days_left', 0)} дн.)", "SUCCESS")
+        _log(f"Type-B Auth: Подписка {oauth_st.get('subscription_type', 'N/A').upper()} действительна ({oauth_st.get('days_left', 0)} дн.)", "SUCCESS")
     else:
-        _log("Claude Auth: Токен не найден или просрочен", "WARN")
+        _log("Type-B Auth: Токен не найден или просрочен", "WARN")
 
-    # 4. Gemini Farm & Прокси (1082, 1083...)
+    # 4. Ensemble Cluster Type-A & Сокеты (1082, 1083...)
     g_profiles = gemini_manager.list_profiles()
     active_gemini_ports = []
     for prof in g_profiles:
@@ -250,20 +249,6 @@ def sync_claude(
             log_fn(msg, lvl)
 
     _log("=== Запуск проверки готовности Claude Code для AionUi ===", "STEP")
-
-    if token_vault_manager.is_vault_locked():
-        _log("Хранилище токенов заблокировано. Авто-разблокировка (CLI/Env)...", "INFO")
-        pw = backup_manager.load_backup_password()
-        if pw:
-            ok, msg = token_vault_manager.unlock_tokens(pw)
-            if ok:
-                _log(f"Сейф разблокирован: {msg}", "SUCCESS")
-            else:
-                _log(f"Ошибка разблокировки (неверный пароль в .env?): {msg}", "ERROR")
-                return {"success": False, "step": "vault_unlock", "error": msg}
-        else:
-            _log("Пароль не установлен в .env! Невозможно разблокировать токены для синхронизации.", "ERROR")
-            return {"success": False, "step": "vault_unlock", "error": "No password in .env"}
 
     st = aionui_claude_bridge.get_oauth_status()
     if st.get("authorized"):
@@ -296,18 +281,13 @@ def sync_claude(
 
 
 def sync_gemini(log_fn: Callable[[str, str], None] | None = None) -> dict[str, Any]:
-    """Только диагностика Gemini Farm конфигурации. Интеграцию выполняет агент."""
+    """Только диагностика конфигурации кластера Type-A. Интеграцию выполняет агент."""
     def _log(msg: str, lvl: str = "INFO"):
         logger.log(msg, lvl)
         if log_fn:
             log_fn(msg, lvl)
 
-    _log("=== Запуск проверки состояния Gemini Farm ===", "STEP")
-
-    if token_vault_manager.is_vault_locked():
-        pw = backup_manager.load_backup_password()
-        if pw:
-            token_vault_manager.unlock_tokens(pw)
+    _log("=== Запуск проверки состояния кластера Type-A ===", "STEP")
 
     profiles = gemini_manager.list_profiles()
     _log(f"Обнаружено профилей Gemini в системе Herdr: {len(profiles)}", "INFO")

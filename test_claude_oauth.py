@@ -214,7 +214,8 @@ class TestClaudeOAuthProfiles(ClaudeOAuthTestBase):
         self.make_active("uuid-a", "alice@x.com", "acc-a", "ref-a")
 
         ok, _ = com.delete_profile("alice")
-        self.assertFalse(ok)
+        self.assertTrue(ok)
+        self.assertFalse((com.PROFILES_DIR / "alice").exists())
         ok, _ = com.delete_profile("bob")
         self.assertTrue(ok)
         self.assertFalse((com.PROFILES_DIR / "bob").exists())
@@ -443,7 +444,7 @@ class TestGeminiPortAssignment(unittest.TestCase):
         exp = time.time() + 1800
         text, expired = gemini_manager.format_expiry(exp)
         self.assertFalse(expired)
-        self.assertIn(time.strftime("до %H:%M %d.%m.%Y", time.localtime(exp)), text)
+        self.assertIn(f"до {time.strftime('%H:%M %d.%m.%Y', time.localtime(exp))}", text)
         text2, _ = gemini_manager.format_expiry(time.time() - 60)
         self.assertIn("истёк", text2)
 

@@ -106,9 +106,9 @@ def reset_failback_state() -> None:
 
 
 def probe_gemini_routing() -> dict[str, Any]:
-    """Проверяет доступность моделей Gemini через SOCKS5 прокси.
+    """Проверяет доступность узлов ансамбля Type-A через SOCKS5 прокси.
     
-    1. Если аккаунт находится в режиме failover (активный порт != забинденный порт),
+    1. Если профиль находится в режиме failover (активный порт != забинденный порт),
        стремится восстановить связь с забинденным портом (проверки каждые 30с, затем реже).
     2. При восстановлении забинденного порта мгновенно производит автовозврат (failback).
     3. При сбое текущего порта подбирает рабочий прокси через auto_proxy_failover.
@@ -127,7 +127,7 @@ def probe_gemini_routing() -> dict[str, Any]:
             _FAILBACK_STATE["last_interval"] = 30.0
 
         if now >= _FAILBACK_STATE["next_check_time"]:
-            # Проверяем доступность забинденного порта (только если он не занят Claude)
+            # Проверяем доступность забинденного порта (только если он не занят Type-B)
             is_claude = proxy_manager.get_proxy_claude_flag(bound_port)
             bound_socks_open = False if is_claude else check_port_open(SOCKS5_HOST, bound_port, timeout=1.0)
             bound_google_ok = False
@@ -370,7 +370,7 @@ def probe_gemini_routing() -> dict[str, Any]:
 
 
 def probe_claude_routing() -> dict[str, Any]:
-    """Проверяет подключение к Anthropic Claude через настроенный прокси с Killswitch."""
+    """Проверяет подключение к узлам Type-B через настроенный сокет с Killswitch."""
     return claude_manager.probe_claude_route()
 
 
@@ -423,12 +423,7 @@ def probe_herdr_wsl() -> dict[str, Any]:
 
 
 def check_all_routes() -> dict[str, Any]:
-    """Параллельно опрашивает маршруты Gemini и Claude.
-
-    Опрос Herdr Multiplexer (probe_herdr_wsl) убран из цикла: карточка Herdr на странице
-    «Маршруты» заменена карточкой aiWatcher, а лишний вызов wsl каждые 15 секунд только нагружал систему.
-    Функция probe_herdr_wsl оставлена для ручного использования.
-    """
+    """Параллельно опрашивает маршруты Type-A и Type-B."""
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         f_gemini = executor.submit(probe_gemini_routing)
         f_claude = executor.submit(probe_claude_routing)

@@ -22,7 +22,7 @@ if errorlevel 1 (
 )
 
 if exist "%PY%" (
-    start "" "%PY%" "%APP_DIR%\config_app.py"
+    start "Herdr Control Center" /d "%APP_DIR%" "%PY%" "%APP_DIR%\config_app.py"
 ) else (
-    start "" "%PY_CON%" "%APP_DIR%\config_app.py"
+    start "Herdr Control Center" /d "%APP_DIR%" "%PY_CON%" "%APP_DIR%\config_app.py"
 )

@@ -354,19 +354,27 @@ def cmd_switch(target: str):
     print(f"  Привязанный SOCKS5: 127.0.0.1:{port}")
 
 
-def cmd_add(profile_name: str | None = None):
+def cmd_add(profile_name: str | None = None, overwrite: bool = False):
     PROFILES_DIR.mkdir(parents=True, exist_ok=True)
     profiles = ordered_profile_dirs()
 
     name = profile_name or f"account-{len(profiles) + 1}"
     target_dir = PROFILES_DIR / name
 
-    if target_dir.exists() and (target_dir / "antigravity-oauth-token").exists():
-        print(f"Профиль '{name}' уже существует с сохраненным токеном. Укажите другое имя.")
+    if target_dir.exists() and (target_dir / "antigravity-oauth-token").exists() and not overwrite:
+        print(f"Профиль '{name}' уже существует с сохраненным токеном. Используйте reauth или укажите другое имя.")
         return
 
     target_dir.mkdir(parents=True, exist_ok=True)
     assigned_port = get_profile_port(target_dir)
+
+    old_target_token = target_dir / "antigravity-oauth-token"
+    old_backup_data = None
+    if old_target_token.exists():
+        try:
+            old_backup_data = old_target_token.read_bytes()
+        except Exception:
+            pass
 
     # 1. Сохраняем текущий активный токен во временный бэкап
     prev_token_content = None
@@ -403,14 +411,19 @@ def cmd_add(profile_name: str | None = None):
 
         ACTIVE_TOKEN.unlink(missing_ok=True)
 
+    # При перезаписи очищаем текущие файлы токена в целевой папке, чтобы отследить запись нового
+    if overwrite:
+        old_target_token.unlink(missing_ok=True)
+
     # Устанавливаем персональный порт для нового входа
     write_active_proxy(assigned_port, profile_name=name)
 
+    action_label = "Перезапись токена для" if overwrite else "Добавление нового OAuth-аккаунта Google в"
     print("=====================================================================")
-    print(f"  Добавление нового OAuth-аккаунта Google в профиль '{name}'")
+    print(f"  {action_label} профиль '{name}'")
     print(f"  Выделенный порт: 🛡️ SOCKS5 127.0.0.1:{assigned_port}")
     print("=====================================================================")
-    print("Сейчас запустится 'agy' для авторизации нового аккаунта.")
+    print("Сейчас запустится 'agy' для авторизации аккаунта.")
     print("1. Перейдите по появившейся ссылке в браузере.")
     print("2. Войдите в Google аккаунт.")
     print("3. Как только вход в браузере подтвердится, токен автоматически")
@@ -456,19 +469,23 @@ def cmd_add(profile_name: str | None = None):
     if target_token.exists():
         new_info = get_token_info(target_token)
         print("---------------------------------------------------------------------")
-        print(f"✓ Новый аккаунт успешно привязан к профилю '{name}'!")
+        print(f"✓ Токен успешно сохранен в профиль '{name}'!")
         print(f"  Google ID: {new_info.get('email')} ({new_info.get('name')})")
         print(f"  Выделенный туннель: SOCKS5 127.0.0.1:{assigned_port}")
         print("---------------------------------------------------------------------")
     else:
         print("✕ Авторизация не была завершена. Токен не сохранен.")
-        try:
-            cfg = target_dir / "profile_config.json"
-            if cfg.exists():
-                cfg.unlink()
-            target_dir.rmdir()
-        except Exception:
-            pass
+        if overwrite and old_backup_data:
+            old_target_token.write_bytes(old_backup_data)
+            print("ℹ️ Восстановлен предыдущий токен профиля.")
+        elif not overwrite:
+            try:
+                cfg = target_dir / "profile_config.json"
+                if cfg.exists():
+                    cfg.unlink()
+                target_dir.rmdir()
+            except Exception:
+                pass
         if prev_token_content and not ACTIVE_TOKEN.exists():
             ACTIVE_TOKEN.write_bytes(prev_token_content)
             if prev_active_profile:
@@ -591,6 +608,10 @@ def main():
 
     p_add = sub.add_parser("add", help="Добавить новый Google аккаунт")
     p_add.add_argument("name", nargs="?", default=None, help="Имя нового профиля")
+    p_add.add_argument("--overwrite", action="store_true", help="Перезаписать существующий профиль")
+
+    p_reauth = sub.add_parser("reauth", help="Перезаписать OAuth-токен в существующем Google аккаунте")
+    p_reauth.add_argument("name", help="Имя существующего профиля для перезаписи токена")
 
     p_ren = sub.add_parser("rename", help="Переименовать Google аккаунт")
     p_ren.add_argument("old_name", help="Текущее имя профиля")
@@ -610,7 +631,9 @@ def main():
     elif args.cmd == "switch":
         cmd_switch(args.target)
     elif args.cmd == "add":
-        cmd_add(args.name)
+        cmd_add(args.name, overwrite=args.overwrite)
+    elif args.cmd == "reauth":
+        cmd_add(args.name, overwrite=True)
     elif args.cmd == "rename":
         cmd_rename(args.old_name, args.new_name)
     elif args.cmd == "guard":

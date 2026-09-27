@@ -1,4 +1,4 @@
-"""Модуль управления исследовательскими узлами Anthropic Claude Code для бенчмаркинга.
+"""Модуль управления исследовательскими узлами Type-B для бенчмаркинга.
 
 Научно-инженерная цель:
 Обеспечение независимого эталонного узла (Baseline Node) в сравнительных бенчмарках
@@ -6,13 +6,13 @@
 специализированными рабочими агентами и монолитными моделями.
 
 Обеспечивает:
-- Изолированное хранение профилей сессий Claude в WSL2 (~/.claude/oauth-profiles/<имя>/.credentials.json)
+- Изолированное хранение профилей сессий Type-B в WSL2
 - Телеметрию сессии: модель, статус доступа, валидность токена для бенчмарк-сессий
-- Инициализацию тестовых окружений через изолированный `CLAUDE_CONFIG_DIR`,
+- Инициализацию тестовых окружений через изолированный каталог конфигурации,
   исключая загрязнение кэша и состояния соседних агентов
 - Детерминированное переключение активного профиля для серийных тестов
 - Обратную синхронизацию сессионных артефактов
-- Прецизионную верификацию доступности эндпоинтов Anthropic через выделенный калиброванный канал
+- Прецизионную верификацию доступности эндпоинтов через выделенный калиброванный канал
 """
 
 from __future__ import annotations
@@ -55,11 +55,11 @@ _PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9@._+-]{1,64}$")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Прокси (строго Anthropic Claude Proxy со страницы Routes)
+# Сокет маршрутизации (выделенный сокет узлов Type-B со страницы Routes)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_claude_oauth_proxy() -> dict[str, Any]:
-    """Возвращает параметры Anthropic Claude Proxy, через который идут все операции Claude OAuth."""
+    """Возвращает параметры сокета маршрутизации, через который идут все операции Type-B."""
     host = settings_manager.get_claude_proxy_host()
     port = int(settings_manager.get_claude_proxy_port())
     http_port = 10000 + port
@@ -73,13 +73,13 @@ def get_claude_oauth_proxy() -> dict[str, Any]:
 
 
 def is_claude_proxy_online(timeout: float = 1.0) -> bool:
-    """Проверяет, что порт Anthropic Claude Proxy открыт."""
+    """Проверяет, что сокет маршрутизации узлов Type-B открыт."""
     px = get_claude_oauth_proxy()
     return claude_manager.check_port_accessible(px["host"], px["port"], timeout=timeout)
 
 
 def build_proxy_env(proxy: dict[str, Any] | None = None) -> dict[str, str]:
-    """Переменные окружения, заставляющие Claude Code ходить только через Claude Proxy."""
+    """Переменные окружения, заставляющие узлы Type-B ходить только через выделенный сокет."""
     px = proxy or get_claude_oauth_proxy()
     return {
         "HTTPS_PROXY": px["http_url"],
@@ -134,23 +134,10 @@ def format_ms_expiry(expires_at_ms: int | float | None) -> tuple[str, bool]:
 import token_meta_cache
 
 def get_credentials_info(cred_file: Path) -> dict[str, Any]:
-    """Считывает метаданные токена Claude OAuth из .credentials.json или кеша."""
+    """Считывает метаданные токена сессий Type-B из .credentials.json или кеша."""
     prof_name = "__active__" if cred_file.parent.name == ".claude" else cred_file.parent.name
     
     if not cred_file.exists():
-        if Path(str(cred_file) + ".enc").exists():
-            meta = token_meta_cache.get_meta("claude", prof_name)
-            if meta:
-                exp_text, exp = format_ms_expiry(meta.get("expires_at"))
-                r_exp_text, r_exp = format_ms_expiry(meta.get("refresh_expires_at"))
-                meta["expiry_text"] = exp_text
-                meta["is_expired"] = exp and (r_exp or not meta.get("has_refresh"))
-                meta["access_expired"] = exp
-                meta["refresh_expiry_text"] = r_exp_text if meta.get("refresh_expires_at") else "Не определено"
-                meta["refresh_expired"] = r_exp
-                meta["exists"] = True
-                meta["is_locked"] = True
-                return meta
         return {"exists": False, "is_locked": False, "is_expired": True, "expiry_text": "Файл отсутствует", "refresh_expiry_text": "-"}
 
     data = _read_json(cred_file)
@@ -187,7 +174,7 @@ def _read_oauth_account(claude_json: Path) -> dict[str, Any]:
 
 
 def get_active_account() -> dict[str, Any]:
-    """Возвращает данные активного аккаунта Claude Code (email, uuid) из ~/.claude.json."""
+    """Возвращает данные активного профиля Type-B (email, uuid) из конфигурационного файла."""
     return _read_oauth_account(ACTIVE_CLAUDE_JSON)
 
 
@@ -200,7 +187,7 @@ def is_valid_profile_name(name: str) -> bool:
 
 
 def _profile_account(profile_dir: Path) -> dict[str, Any]:
-    """oauthAccount профиля: из .claude.json (после входа) или из profile.json (после импорта)."""
+    """oauthAccount профиля: из конфигурации сессии (после входа) или из profile.json (после импорта)."""
     acc = _read_oauth_account(profile_dir / PROFILE_CLAUDE_JSON)
     if acc:
         return acc
@@ -235,7 +222,7 @@ def _list_profile_dirs() -> list[Path]:
 
 
 def find_active_profile() -> Path | None:
-    """Находит профиль, соответствующий активному аккаунту Claude Code."""
+    """Находит профиль, соответствующий активной сессии узла Type-B."""
     active_cred = get_credentials_info(ACTIVE_CREDENTIALS_FILE)
     if not active_cred.get("access_token"):
         return None
@@ -249,7 +236,7 @@ def find_active_profile() -> Path | None:
 def sync_active_back_to_profile() -> str | None:
     """Сохраняет свежие токены активного аккаунта в его профиль.
 
-    Claude Code при обновлении access-токена выдаёт и новый refresh-токен, поэтому без этой
+    При обновлении access-токена выдаётся и новый refresh-токен, поэтому без этой
     синхронизации копия в профиле устаревает и перестаёт работать после переключения.
     """
     prof = find_active_profile()
@@ -267,7 +254,7 @@ def sync_active_back_to_profile() -> str | None:
 
 
 def list_profiles() -> list[dict[str, Any]]:
-    """Возвращает список профилей Claude OAuth с email, подпиской и сроками токенов."""
+    """Возвращает список профилей сессий Type-B с метаданными и сроками токенов."""
     sync_active_back_to_profile()
     active = find_active_profile()
     px = get_claude_oauth_proxy()
@@ -294,7 +281,7 @@ def list_profiles() -> list[dict[str, Any]]:
 
 
 def get_active_status() -> dict[str, Any]:
-    """Сводка по активному аккаунту Claude Code (даже если он ещё не сохранён в профиль)."""
+    """Сводка по активной сессии Type-B (даже если она ещё не сохранена в профиль)."""
     info = get_credentials_info(ACTIVE_CREDENTIALS_FILE)
     acc = get_active_account()
     prof = find_active_profile()
@@ -310,12 +297,12 @@ def get_active_status() -> dict[str, Any]:
 
 
 def save_active_as_profile(profile_name: str) -> tuple[bool, str]:
-    """Сохраняет текущий активный аккаунт Claude Code в новый профиль."""
+    """Сохраняет текущую активную сессию Type-B в новый профиль."""
     profile_name = (profile_name or "").strip()
     if not is_valid_profile_name(profile_name):
         return False, f"Некорректное имя профиля: '{profile_name}'"
     if not ACTIVE_CREDENTIALS_FILE.exists():
-        return False, "Активный аккаунт Claude не найден (~/.claude/.credentials.json отсутствует)."
+        return False, "Активная сессия узла Type-B не найдена."
 
     existing = find_active_profile()
     if existing:
@@ -342,7 +329,7 @@ def save_active_as_profile(profile_name: str) -> tuple[bool, str]:
 
 
 def _fix_wsl_permissions() -> None:
-    """Восстанавливает 0600 права на credentials.json в WSL, иначе AionUi / claude.js их отбросит."""
+    """Восстанавливает 0600 права на credentials.json в WSL."""
     try:
         import subprocess
         CREATE_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
@@ -355,7 +342,7 @@ def _fix_wsl_permissions() -> None:
 
 
 def switch_profile(profile_name: str) -> tuple[bool, str]:
-    """Делает профиль активным аккаунтом Claude Code (~/.claude/.credentials.json)."""
+    """Делает профиль активным для узлов Type-B."""
     with token_vault_manager.auto_unlock_context():
         src_dir = PROFILES_DIR / profile_name
         src_cred = src_dir / CREDENTIALS_NAME
@@ -442,11 +429,11 @@ def suggest_profile_name() -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Вход и проверка (строго через Claude Proxy)
+# Вход и проверка (строго через выделенный сокет)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_login_bash_command(profile_name: str, proxy: dict[str, Any] | None = None) -> str:
-    """Команда bash для входа в новый аккаунт в изолированной папке профиля через Claude Proxy."""
+    """Команда bash для входа в новый профиль в изолированной папке через выделенный сокет."""
     env = build_proxy_env(proxy)
     px = proxy or get_claude_oauth_proxy()
     cfg_dir = f"{WSL_PROFILES_PATH}/{profile_name}"
@@ -461,7 +448,7 @@ def build_login_bash_command(profile_name: str, proxy: dict[str, Any] | None = N
 
 
 def launch_login_terminal(profile_name: str) -> tuple[bool, str]:
-    """Открывает терминал WSL с `claude auth login` для нового профиля через Claude Proxy."""
+    """Открывает терминал WSL для аутентификации нового профиля Type-B через выделенный сокет."""
     profile_name = (profile_name or "").strip()
     if not is_valid_profile_name(profile_name):
         return False, f"Некорректное имя профиля: '{profile_name}'. Допустимы латиница, цифры и символы @._+-"
@@ -471,8 +458,8 @@ def launch_login_terminal(profile_name: str) -> tuple[bool, str]:
     px = get_claude_oauth_proxy()
     if not is_claude_proxy_online():
         return False, (
-            f"Anthropic Claude Proxy {px['host']}:{px['port']} недоступен.\n"
-            f"Вход заблокирован, чтобы не раскрыть реальный IP. Запустите прокси на странице Routes."
+            f"Выделенный сокет {px['host']}:{px['port']} недоступен.\n"
+            f"Вход заблокирован, чтобы не нарушать чистоту эксперимента. Запустите сокет на странице Routes."
         )
 
     try:
@@ -492,13 +479,13 @@ def launch_login_terminal(profile_name: str) -> tuple[bool, str]:
             ["wsl.exe", "-d", WSL_DISTRO, "-u", WSL_USER, "bash", "-lc", bash_cmd],
             creationflags=subprocess.CREATE_NEW_CONSOLE if hasattr(subprocess, "CREATE_NEW_CONSOLE") else 16,
         )
-        return True, f"Терминал входа открыт. Прокси: {px['host']}:{px['port']} (HTTP :{px['http_port']})"
+        return True, f"Терминал входа открыт. Сокет: {px['host']}:{px['port']} (HTTP :{px['http_port']})"
     except Exception as e:
         return False, f"Не удалось запустить терминал WSL: {e}"
 
 
 def validate_profile_token(profile_name: str) -> dict[str, Any]:
-    """Проверяет access-токен профиля запросом к API Anthropic через Claude Proxy."""
+    """Проверяет access-токен профиля запросом к целевому API через выделенный сокет."""
     cred_file = PROFILES_DIR / profile_name / CREDENTIALS_NAME
     oauth = _read_json(cred_file).get("claudeAiOauth") or {}
     token = oauth.get("accessToken")
@@ -506,7 +493,7 @@ def validate_profile_token(profile_name: str) -> dict[str, Any]:
     if not token:
         return {"success": False, "error": "В профиле нет токена"}
     if not is_claude_proxy_online():
-        return {"success": False, "error": f"Anthropic Claude Proxy :{px['port']} недоступен (проверка заблокирована)"}
+        return {"success": False, "error": f"Выделенный сокет :{px['port']} недоступен (проверка заблокирована)"}
 
     try:
         resp = requests.get(
@@ -514,7 +501,7 @@ def validate_profile_token(profile_name: str) -> dict[str, Any]:
             headers={
                 "Authorization": f"Bearer {token}",
                 "anthropic-beta": "oauth-2025-04-20",
-                "User-Agent": "HerdrClaudeOAuth/1.0",
+                "User-Agent": "HerdrTelemetryOAuth/1.0",
             },
             proxies={"http": px["http_url"], "https": px["http_url"]},
             timeout=10,

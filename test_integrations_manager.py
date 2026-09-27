@@ -135,43 +135,34 @@ class TestIntegrationsManagerOperations(unittest.TestCase):
         self.assertEqual(res["gemini"]["total_profiles"], 1)
         self.assertEqual(res["gemini"]["active_ports"], [1082])
 
+    @patch("integrations_manager.check_http_status", return_value=(True, 200, "OK"))
+    @patch("integrations_manager.check_port_accessible", return_value=True)
     @patch("aionui_claude_bridge.get_oauth_status")
-    @patch("aionui_claude_bridge.ensure_claude_proxy_settings")
-    @patch("aionui_claude_bridge.patch_aionui_managed_resources")
-    @patch("aionui_claude_bridge.patch_aionui_database")
-    def test_sync_claude_flow(self, mock_db, mock_res, mock_proxy, mock_auth):
+    def test_sync_claude_flow(self, mock_auth, mock_port, mock_http):
         """Проверяет выполнение этапов синхронизации Claude."""
         mock_auth.return_value = {"authorized": True, "subscription_type": "pro", "days_left": 10}
-        mock_proxy.return_value = {"success": True}
-        mock_res.return_value = {"success": True}
-        mock_db.return_value = {"success": True, "rows_affected": 1}
 
         res = integrations_manager.sync_claude()
         self.assertTrue(res["success"])
-        self.assertTrue(res["proxy"]["success"])
-        self.assertTrue(res["resources"]["success"])
-        self.assertTrue(res["db"]["success"])
+        self.assertTrue(res["socks"])
+        self.assertTrue(res["aion"])
+        self.assertTrue(res["auth"])
 
+    @patch("integrations_manager.check_http_status", return_value=(True, 200, "OK"))
     @patch("gemini_manager.list_profiles")
     @patch("integrations_manager.check_port_accessible")
-    @patch("urllib.request.urlopen")
-    def test_sync_gemini_flow(self, mock_urlopen, mock_port, mock_profiles):
+    def test_sync_gemini_flow(self, mock_port, mock_profiles, mock_http):
         """Проверяет выполнение этапов синхронизации Gemini."""
         mock_profiles.return_value = [
             {"name": "Prof1", "email": "p1@gmail.com", "port": 1082},
         ]
         mock_port.return_value = True
 
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = b'{"choices": [{"message": {"content": "Pong"}}]}'
-        mock_resp.__enter__.return_value = mock_resp
-        mock_urlopen.return_value = mock_resp
-
         res = integrations_manager.sync_gemini()
         self.assertTrue(res["success"])
         self.assertEqual(len(res["profiles"]), 1)
         self.assertTrue(res["profiles"][0]["alive"])
-        self.assertTrue(res["ping_ok"])
+        self.assertTrue(res["omni_ok"])
 
 
 class TestGUIIntegrationsTab(unittest.TestCase):

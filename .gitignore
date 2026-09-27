@@ -33,6 +33,15 @@ dist/
 .env
 .env.*
 !.env.example
+antigravity-oauth-token
+antigravity-oauth-token*
+.credentials.json
+.credentials.json*
+extracted_tokens.json
+*.enc
+*.token
+*.key
+*.pem
 
 # Backups and temporary files
 *.bak

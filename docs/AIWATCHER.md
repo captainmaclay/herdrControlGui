@@ -11,17 +11,17 @@
 
 | Сервис | Порт | Проверка (`check_cmd`) | Запуск (`start_cmd`) |
 | :--- | :-: | :--- | :--- |
-| **OmniRoute** — шлюз к моделям | 20128 | ответ `http://127.0.0.1:20128/` (любой HTTP-код, кроме `000`) | `tmux new -d -s omniroute bash -lc 'omniroute serve --no-open'` (старая сессия `omniroute` перед этим закрывается) |
+| **OmniRoute** — шлюз к моделям | 20128 | ответ `http://127.0.0.1:20128/` (любой HTTP-код, кроме `000`) | `tmux -L omniroute new -d -s omniroute bash -lc 'omniroute serve --no-open'` на отдельном сервере tmux (старая сессия перед этим закрывается) |
 | **AionUi** — веб-интерфейс и бэкенд `aioncore` | 25808 | пропуск при свежем флаге `~/.aionui-web/.maintenance`, иначе ответ `http://127.0.0.1:25808/` | `tmux new -d -s aionui env -u HTTP_PROXY -u http_proxy -u HTTPS_PROXY -u https_proxy -u ALL_PROXY -u all_proxy NO_PROXY='*' no_proxy='*' /home/f/.local/bin/aionui-web start --no-open --port 25808` |
 
-Команды выполняются через `wsl.exe bash -lc "<команда>"` без окна консоли.
+Команды выполняются через `wsl.exe -e bash -lc "<команда>"` без окна консоли. Флаг `-e` обязателен (раздел 2в).
 
 Кроме «жив ли процесс», для AionUi проверяется **здоровье** (`health_cmd`): отвечает ли `/api/auth/status` кодом 2xx–4xx. Если AionUi жив, но отдаёт **502**, в браузере вместо чатов появляется экран входа **«Connection failed, please try again»**. После `heal_after_failures` (3) неудачных проверок подряд сторож сам выполняет **чистый перезапуск** (`heal_cmd` = `aionUi_helper/scripts/fix_aionui_login.py --fix`), не чаще раза в `heal_cooldown_s` (600 с). Подробно — раздел 2а.
 
 Чего сторож **не** делает сам:
 
 - не чинит базу AionUi автоматически, это делает кнопка «🛠 Починить базу AionUi» с подтверждением;
-- не следит за прокси, Claude и самим Herdr Control Center.
+- не следит за сокетами прокси, узлами инференса и самим Herdr Control Center.
 
 ---
 
@@ -52,7 +52,7 @@
 **Цепочка причин:**
 
 1. **03:44 — AionUi запущен вручную из терминала**, а не сторожем. Признак в `~/.aionui-web/aionui.log`: `opened http://127.0.0.1:25808 in your browser` (сторож запускает с `--no-open`). В окружении терминала были `HTTP_PROXY/HTTPS_PROXY=http://127.0.0.1:11015` и `ALL_PROXY=socks5h://127.0.0.1:1015`.
-2. Лаунчер `aionui-web` (порт 25808) проксирует `/api/*` на внутренний `aioncore` (`127.0.0.1:45469`). Из-за переменных прокси эти запросы ушли в прокси Claude, и тот вернул **502**: `could not verify admin credentials: /api/auth/status returned 502`. WebSocket `/ws` шёл напрямую, поэтому «что-то работало».
+2. Лаунчер `aionui-web` (порт 25808) проксирует `/api/*` на внутренний `aioncore` (`127.0.0.1:45469`). Из-за переменных прокси эти запросы ушли в локальный сокет, и тот вернул **502**: `could not verify admin credentials: /api/auth/status returned 502`. WebSocket `/ws` шёл напрямую, поэтому «что-то работало».
 3. **База уже была повреждена** (`database disk image is malformed` с 02:52), а в 04:04 у работающего процесса пропали `-wal`/`-shm`. Все записи после этого идут в удалённый файл и потеряются при перезапуске.
 4. **Почему никто не починил:**
    - старый aiWatcher проверял только «есть ли процесс `aionui-web`» — процесс был, значит «RUNNING». Состояние «жив, но 502» он не видел вообще;
@@ -91,18 +91,52 @@
 **Исправление (`watchdog_manager.py`):**
 
 - `check_cmd` = `OMNIROUTE_CHECK_CMD`: живость проверяется по ответу порта 20128, а не по имени процесса;
-- `start_cmd` = `OMNIROUTE_START_CMD`: `tmux new -d -s omniroute bash -lc 'omniroute serve --no-open'`. Сессия tmux переживает закрытие окна WSL, как у AionUi;
+- `start_cmd` = `OMNIROUTE_START_CMD`: `tmux -L omniroute new -d -s omniroute bash -lc 'omniroute serve --no-open'`. Сессия tmux переживает закрытие окна WSL, как у AionUi;
 - `_upgrade_app` при загрузке автоматически заменяет старые команды OmniRoute (`ps aux | grep`, `omniroute start`, запуск без tmux) в `watchdog_config.json`.
 
 **Ручная проверка и запуск в WSL:**
 
 ```bash
 curl --noproxy '*' -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:20128/   # 000 = лежит
-tmux kill-session -t omniroute 2>/dev/null; tmux new -d -s omniroute bash -lc 'omniroute serve --no-open'
-tmux attach -t omniroute    # посмотреть вывод сервера (выход: Ctrl+B, D)
+tmux -L omniroute kill-session -t omniroute 2>/dev/null; tmux -L omniroute new -d -s omniroute bash -lc 'omniroute serve --no-open'
+tmux -L omniroute attach -t omniroute    # посмотреть вывод сервера (выход: Ctrl+B, D)
 ```
 
 Если после запуска порт так и не отвечает, выполнить `omniroute serve --no-open` в терминале и прочитать ошибку. Логи лежат в `~/.omniroute/logs/application/app.log` и `~/.omniroute/server.log`.
+
+---
+
+## 2в. Повтор: OmniRoute убивался при каждом «лечении» AionUi (25.09.2026, 19:45)
+
+**Симптом.** После исправления 2б OmniRoute, запущенный в tmux, снова упал: `app.log` в 19:45:33 — `[Shutdown] Received SIGHUP ... Bye.` Сессия `omniroute` пропала, сессия `aionui` создана заново в 19:45:42. Сокет `/tmp/tmux-1000/default` тоже пересоздан: погиб **весь сервер tmux**.
+
+**Цепочка причин:**
+
+1. **`wsl.exe` без `-e` ломал команды сторожа.** `run_cmd` выполнял `wsl.exe bash -lc "<cmd>"`, а `wsl.exe` сначала отдаёт строку своей оболочке. Та заранее раскрывает `$c` и `$(...)` и срезает кавычки. Если вызывать из Windows (проверено через `.venv\Scripts\python.exe`):
+   - проверка OmniRoute `c=$(curl ...); [ "$c" != 000 ]` превращалась в `[ "" != 000 ]` и **всегда** была успешной: ложное «живой», даже когда порт лежит;
+   - проверка здоровья AionUi **всегда** падала: `[: : integer expression expected`.
+   Из WSL-терминала баг не воспроизводится, поэтому тесты и ручная проверка его не видели.
+2. **Сторож «лечил» здоровый AionUi.** Из-за ложных провалов здоровья через 3 проверки (~15 с после запуска Herdr Control Center: он стартовал в 19:45:19) запускался `fix_aionui_login.py --fix`, а потом ещё раз каждые 10 минут.
+3. **Остановка AionUi убивала tmux-сервер.** `aionui_maint.stop_aionui()` делает `pkill -f "[a]ionui-web start"`. Процесс сервера tmux носит командную строку клиента, который его создал: `tmux new -d -s aionui env ... /home/f/.local/bin/aionui-web start ...`. Шаблон совпадал, сервер tmux погибал вместе со **всеми** сессиями, OmniRoute получал SIGHUP.
+4. **Никто не поднимал OmniRoute обратно**: по пункту 1 сторож считал его живым.
+
+**Исправление:**
+
+| Где | Что |
+| :--- | :--- |
+| `watchdog_manager.run_cmd` | `wsl.exe -e bash -lc <cmd>`: команда идёт в bash как есть |
+| `OMNIROUTE_START_CMD` | OmniRoute на своём сервере tmux `tmux -L omniroute`, не общем с AionUi |
+| `WatchdogService.start()` | всегда записывает конфиг: обновлённые `_upgrade_app` команды попадают в `watchdog_config.json` |
+| `aionUi_helper/scripts/aionui_maint.py` | `PROC_PATTERNS = ("^[^ ]*[a]ionui-web start", "^[^ ]*[b]undled-aioncore/...")`: шаблон должен совпасть с первым словом командной строки, то есть с самим бинарником, а не с `tmux new ...` |
+| скилл `aionui-subagent-integration` | вместо `pkill -f 'aionui-web'` (убивал tmux и сабагентов) — привязанные шаблоны |
+
+**Проверка (выполнена):** после перезапуска Herdr Control Center `tmux -L omniroute kill-server` → сторож поднял OmniRoute за 6 с, сессия `aionui` за 15+ мин ни разу не перезапускалась (ложного «лечения» больше нет); `pgrep -af '^[^ ]*[a]ionui-web start'` находит только `/home/f/.local/bin/aionui-web start`, без `tmux new`.
+
+**Правила на будущее:**
+
+- команды из Windows в WSL — только `wsl.exe -e bash -lc ...`; проверять их запуском из Windows-Python, а не из WSL-терминала;
+- не останавливать AionUi через `pkill -f aionui-web` или `tmux kill-server`, только `aionui_maint.stop_aionui()`;
+- долгоживущие сервисы — каждый на своём сервере tmux (`-L <имя>`).
 ---
 
 ## 3. Настройки: `watchdog_config.json`
@@ -148,7 +182,7 @@ tmux attach -t omniroute    # посмотреть вывод сервера (в
 | :--- | :--- |
 | Зависшая команда WSL вешала сторож навсегда | Таймаут 30 с на каждую команду |
 | Пока сервис стартует, проверка падает, и он запускается повторно (OmniRoute мог оказаться запущен дважды) | Период прогрева `grace_seconds` (30 с): статус `ЗАПУСКАЕТСЯ...`, повторного запуска нет |
-| AionUi «жив», если в системе есть любой процесс с `aionui-web` в командной строке (включая дочерние Claude CLI) | Живость по ответу порта 25808 |
+| AionUi «жив», если в системе есть любой процесс с `aionui-web` в командной строке (включая дочерние рабочие CLI) | Живость по ответу порта 25808 |
 | «Жив, но отвечает 502» (экран входа «Connection failed») считалось нормой | Проверка здоровья `/api/auth/status` и автоматический чистый перезапуск (раздел 2а) |
 | Починить базу или перезапустить AionUi можно было только bat-файлами из другой папки | Кнопки «♻ Перезапустить AionUi» и «🛠 Починить базу AionUi» прямо в карточке |
 | Во время ремонта базы сторож поднимал AionUi и портил базу | Уважается флаг `~/.aionui-web/.maintenance`, его ставят `repair`/`restore`/`fix_aionui_login` из aionUi_helper; флаг старше 30 мин игнорируется |
@@ -214,6 +248,6 @@ python -m unittest test_watchdog_manager test_aiwatcher_card test_ui_command_ref
 | :--- | :-: | :--- |
 | `test_watchdog_manager.py` | 42 | конфиг (создание, импорт и обновление старого конфига aiWatcher, приоритет, битый файл, границы значений, атомарная запись, «ничего не пишет до запуска»); проходы: работающий сервис не трогается, упавший запускается, ошибка запуска, **прогрев без двойного запуска**, выключенный сервис, выключенный сторож, **внешний aiWatcher ставит на паузу**, кэш поиска, сохранение настроек, события; поток: старт/пробуждение/стоп, один поток, живучесть при исключениях; `run_cmd` (bash, таймаут, нет `wsl.exe`), разбор процессов PowerShell, порядок остановки внешнего сторожа, обратимое отключение автозапуска, bash-проверка флага обслуживания; **здоровье и лечение**: 502 → «НЕ ОТВЕЧАЕТ», лечение после 3 неудач, пауза между лечениями (без цикла), провал лечения, сброс счётчика, нет проверки во время прогрева, старые конфиги получают проверку здоровья, ручные действия в фоне и «занято»; **настоящая bash-проверка здоровья** против локального сервера 200/502 при прокси в окружении |
 | `test_aiwatcher_card.py` | 22 | настоящее окно: карточка Herdr убрана, aiWatcher стоит первой на «Маршрутах», заголовок, строки сервисов, статусы и журнал после прохода, кнопка вкл/выкл (и сохранение), галочки сервисов, «Проверить сейчас», предупреждение о внешнем aiWatcher, кнопка его остановки (и отмена), обрезка журнала, события после закрытия, итоговый статус маршрутов без Herdr, переключение вкладок, «Стереть все данные» без падения, окно само не запускает сторож и не пишет конфиг, закрытие останавливает поток, переводы en/ru; статус «НЕ ОТВЕЧАЕТ» и автолечение в окне, кнопка чистого перезапуска, кнопка ремонта базы с подтверждением, блокировка кнопок во время действия |
-| `test_ui_command_refs.py` | 4 | статически: каждое `self.<имя>` в `HerdrConfigApp` существует (ловит `AttributeError` вроде `_save_claude_settings_action`), нет остатков карточки Herdr, aiWatcher строится перед Gemini, `main()` запускает сторож до `mainloop()` |
+| `test_ui_command_refs.py` | 4 | статически: каждое `self.<имя>` в `HerdrConfigApp` существует (ловит `AttributeError` вроде `_save_claude_settings_action`), нет остатков карточки Herdr, aiWatcher строится перед карточками узлов, `main()` запускает сторож до `mainloop()` |
 
 Тесты не трогают настоящие `watchdog_config.json`, `settings.json`, WSL и автозагрузку: пути, выполнение команд и поиск процессов подменены.

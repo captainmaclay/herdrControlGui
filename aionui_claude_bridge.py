@@ -1,7 +1,7 @@
-"""Модуль-мост интеграции эталонного рабочего узла Anthropic Claude Code в диспетчер AionUi.
+"""Модуль-мост интеграции эталонного рабочего узла Type-B в диспетчер AionUi.
 
 Научно-инженерная цель:
-Подключение эталонной модели Claude к мультиагентным графам исполнения AionUi
+Подключение эталонной модели Type-B к мультиагентным графам исполнения AionUi
 для сравнительных замеров качества рассуждений против распределённых ансамблей сабагентов.
 
 Обеспечивает автоматизацию шагов интеграции:
@@ -67,14 +67,14 @@ def get_claude_credentials_files() -> list[Path]:
     """Возвращает пути к файлам .credentials.json в Windows и WSL2."""
     files: list[Path] = []
     
-    # 1. Windows: %USERPROFILE%\.claude\.credentials.json
+    # 1. Windows: %USERPROFILE%/<config_dir>/.credentials.json
     try:
         win_file = Path.home() / ".claude" / ".credentials.json"
         files.append(win_file)
     except Exception:
         pass
 
-    # 2. WSL2: \\wsl$\Ubuntu\home\<user>\.claude\.credentials.json
+    # 2. WSL2: \\wsl$\Ubuntu\home\<user>/<config_dir>/.credentials.json
     wsl_root = get_wsl_rootfs_path()
     if wsl_root:
         wsl_file = wsl_root / f"home/{WSL_USER}/.claude/.credentials.json"
@@ -99,7 +99,7 @@ def get_claude_settings_files() -> list[Path]:
 
 
 def validate_oauth_data(raw_data: dict[str, Any]) -> tuple[bool, str, dict[str, Any]]:
-    """Валидирует и нормализует структуру OAuth-данных Claude Code."""
+    """Валидирует и нормализует структуру OAuth-данных узлов Type-B."""
     if not isinstance(raw_data, dict):
         return False, "Data must be a JSON object", {}
 
@@ -187,7 +187,7 @@ if os.path.exists(p):
 
 
 def get_oauth_status() -> dict[str, Any]:
-    """Возвращает детальный статус текущей авторизации Claude."""
+    """Возвращает детальный статус текущей авторизации узла Type-B."""
     cred_files = get_claude_credentials_files()
     found_data = None
     active_path = None
@@ -342,7 +342,7 @@ print("STATUS:SUCCESS")
 
 
 def patch_aionui_database() -> dict[str, Any]:
-    """Регистрирует команду 'claude' для агента Claude Code в базе данных AionUi внутри WSL2."""
+    """Регистрирует исполняемый файл для агента Type-B в базе данных AionUi внутри WSL2."""
     script = f"""
 import sqlite3, os
 

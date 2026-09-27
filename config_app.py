@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""Herdr Config — Центр управления и маршрутизации AI-агентов (WSL2 / Windows).
+"""Herdr Research Control Center — Платформа студенческого бенчмарка и маршрутизации распределённых сабагентов (WSL2 / Windows).
+
+Исследовательский проект проверки гипотезы эффективности ансамблей специализированных рабочих узлов против монолитных моделей.
 
 Включает:
-1. 📡 Маршруты & Herdr:
-   - Состояние сервера Herdr и активных панелей агентов (agy, claude) в WSL2
-   - Статус туннеля SOCKS5 для Google Gemini (порт 1081)
-   - Статус прямого подключения для Anthropic Claude (белый IP)
+1. 📡 Маршруты & aiWatcher:
+   - Состояние рабочих сервисов AionUi и OmniRoute в WSL2
+   - Статус изолированных сокетов телеметрии для рабочих узлов Type-A (1081+)
+   - Статус сокета и изоляции для рабочих узлов Type-B (:1015 / :11015)
 2. 🛡️ SOCKS5 Прокси:
-   - Список SOCKS5-прокси начиная от 1081 (+1 с каждым добавлением)
+   - Список выделенных сокетов начиная от 1081 (+1 с каждым добавлением)
    - Кнопка ➕ для быстрого создания нового SOCKS5
    - Пагинация строго по 10 строк на страницу с переключением страниц
-   - В каждой строке: статус (Online/Offline), внешний IP, определение страны (или undefined)
-   - Индивидуальная и групповая проверка прокси
-3. 🔮 Gemini OAuth:
-   - Управление Google OAuth2 аккаунтами без API-ключей
-   - Список сохраненных профилей (~/.gemini/profiles)
-   - Переключение активного аккаунта в один клик
-   - Онлайн-валидация токенов в Google API
-   - Добавление новых Google-аккаунтов через браузерный OAuth
+   - Индивидуальная и групповая проверка доступности сокетов
+3. 🔮 Узлы Type-A OAuth:
+   - Управление сессиями рабочих узлов без API-ключей
+   - Список сохраненных профилей сессий
+   - Ротация и балансировка узлов в один клик
+   - Онлайн-валидация токенов
 """
 
 from __future__ import annotations
@@ -108,6 +108,7 @@ FONT_TITLE = ("Segoe UI", 11, "bold")
 FONT_BOLD = ("Segoe UI", 9, "bold")
 FONT_MAIN = ("Segoe UI", 9)
 FONT_SUB = ("Segoe UI", 8)
+FONT_SMALL = FONT_SUB
 FONT_MONO = ("Consolas", 9)
 FONT_MONO_BOLD = ("Consolas", 9, "bold")
 
@@ -249,9 +250,14 @@ class HerdrConfigApp(tk.Tk):
         self.current_proxy_page = 1
         self.is_checking_proxies = False
 
-        # Состояние Gemini OAuth
+        # Состояние сессий узлов Type-A
         self.gemini_profiles: list[dict] = []
         self.is_checking_gemini = False
+        self._gemini_batch_check_running = False
+        self._gemini_batch_cancel_event = threading.Event()
+        self._gemini_batch_timer_after_id = None
+        self._gemini_batch_start_time = 0.0
+        self.status_var = tk.StringVar(value="")
 
         # Состояние и логгер интеграций
         self._integ_task_running = False
@@ -261,15 +267,6 @@ class HerdrConfigApp(tk.Tk):
         self._build_ui()
         if HAS_TRAY:
             self._init_tray()
-
-        # Enforcement: 99% времени в зашифрованом состоянии при старте.
-        if backup_manager.load_backup_password():
-            try:
-                with token_vault_manager.auto_unlock_context():
-                    pass # metadata is automatically updated inside context
-            except Exception:
-                pass
-        token_vault_manager.ensure_locked()
 
         # Первоначальная загрузка данных
         self.load_proxies_data()
@@ -284,17 +281,12 @@ class HerdrConfigApp(tk.Tk):
         # Запуск проверки маршрутов
         self.after(300, self.refresh_routes_async)
 
-        # Периодическое полное обновление маршрутов (каждые 15 секунд)
-        self.node_isolate_thread = node_isolate_manager.NodeIsolateThread(
-            lambda: (
-                settings_manager.get_claude_proxy_host(),
-                settings_manager.get_claude_proxy_port(),
-                settings_manager.get_claude_node_isolate()
-            )
-        )
-        self.node_isolate_thread.start()
+        # Гарантируем чистоту брандмауэра Windows (Node.js и сторонние утилиты без блокировок)
+        try:
+            node_isolate_manager.remove_firewall_rule()
+        except Exception:
+            pass
 
-        token_vault_manager.start_vault_watchdog()
         self._schedule_auto_refresh()
 
         # На передний план
@@ -609,11 +601,11 @@ class HerdrConfigApp(tk.Tk):
         self.aiwatcher_card = self._build_aiwatcher_card(parent)
         self.aiwatcher_card.pack(fill="x", pady=(0, 10))
 
-        # ── Карточка 2: Google Gemini (SOCKS5) ──────────────────
+        # ── Карточка 2: Worker Nodes Type-A (SOCKS5) ─────────────
         self.gemini_card = self._build_gemini_card(parent)
         self.gemini_card.pack(fill="x", pady=(0, 10))
 
-        # ── Карточка 3: Anthropic Claude (Оригинальный IP) ──────
+        # ── Карточка 3: Worker Nodes Type-B (Direct/Proxy) ────────
         self.claude_card = self._build_claude_card(parent)
         self.claude_card.pack(fill="x")
 
@@ -948,7 +940,7 @@ class HerdrConfigApp(tk.Tk):
         )
         self.claude_status_lbl.pack(fill="x", pady=(0, 6))
 
-        # Настройки прокси Claude и Killswitch
+        # Настройки сокета маршрутизации Type-B и аварийной изоляции Killswitch
         cfg_frame = tk.Frame(pad, bg=C["card_inner"], bd=1, relief="solid")
         cfg_frame.configure(highlightbackground=C["border"], highlightthickness=1)
         cfg_frame.pack(fill="x", pady=(0, 6))
@@ -993,6 +985,65 @@ class HerdrConfigApp(tk.Tk):
         )
         self.claude_save_btn.pack(side="left", padx=(0, 12))
 
+        # Мастер-переключатель ограничения на сокет 1015 (Off / On) и проверка изоляции
+        row_restr = tk.Frame(cfg_in, bg=C["card_inner"])
+        row_restr.pack(fill="x", pady=(6, 4))
+
+        tk.Label(
+            row_restr, text=t("lbl_claude_restriction"),
+            font=FONT_BOLD, fg=C["fg"], bg=C["card_inner"]
+        ).pack(side="left", padx=(0, 8))
+
+        self.claude_restriction_var = tk.BooleanVar(value=settings_manager.get_claude_restriction_enabled())
+        self.claude_restr_btn = tk.Button(
+            row_restr,
+            text=t("btn_claude_restriction_on") if self.claude_restriction_var.get() else t("btn_claude_restriction_off"),
+            font=FONT_BOLD,
+            bg=C["green"] if self.claude_restriction_var.get() else C["border"],
+            fg="#11111b" if self.claude_restriction_var.get() else C["subtext"],
+            activebackground=C["accent_hover"],
+            activeforeground="#11111b",
+            bd=0, padx=10, pady=3, cursor="hand2",
+            command=self._on_toggle_claude_restriction
+        )
+        self.claude_restr_btn.pack(side="left", padx=(0, 8))
+
+        self.claude_check_iso_btn = tk.Button(
+            row_restr,
+            text=t("btn_claude_check_isolation"),
+            font=FONT_MAIN,
+            bg=C["card_inner"],
+            fg=C["accent_blue"],
+            activebackground=C["border"],
+            activeforeground=C["fg"],
+            bd=1, relief="solid", highlightthickness=0,
+            padx=8, pady=2, cursor="hand2",
+            command=self._on_check_claude_isolation
+        )
+        self.claude_check_iso_btn.pack(side="left", padx=(0, 8))
+
+        self.claude_iso_badge = tk.Label(
+            row_restr,
+            text="[...]",
+            font=FONT_MONO,
+            fg=C["subtext"],
+            bg=C["card_inner"]
+        )
+        self.claude_iso_badge.pack(side="left")
+
+        # Примечание о влиянии на сторонние приложения (напр. Smoozy)
+        self.claude_restr_note = tk.Label(
+            cfg_in,
+            text=t("claude_restriction_note"),
+            font=FONT_SUB,
+            fg=C["subtext"],
+            bg=C["card_inner"],
+            anchor="w",
+            justify="left",
+            wraplength=650
+        )
+        self.claude_restr_note.pack(fill="x", pady=(0, 6))
+
         # Чекбокс Killswitch
         self.claude_killswitch_var = tk.BooleanVar(value=settings_manager.get_claude_killswitch())
         self.claude_ks_cb = tk.Checkbutton(
@@ -1003,19 +1054,7 @@ class HerdrConfigApp(tk.Tk):
             activeforeground=C["fg"], selectcolor=C["input_bg"],
             cursor="hand2", command=self._on_claude_killswitch_toggle
         )
-        self.claude_ks_cb.pack(anchor="w", pady=(4, 2))
-
-        # Чекбокс Изоляции Node.js
-        self.claude_node_isolate_var = tk.BooleanVar(value=settings_manager.get_claude_node_isolate())
-        self.claude_ni_cb = tk.Checkbutton(
-            cfg_in, text="Isolate - Node.js and claude.exe",
-            variable=self.claude_node_isolate_var,
-            font=FONT_BOLD, fg=C["accent_peach"] if self.claude_node_isolate_var.get() else C["subtext"],
-            bg=C["card_inner"], activebackground=C["card_inner"],
-            activeforeground=C["fg"], selectcolor=C["input_bg"],
-            cursor="hand2", command=self._on_claude_node_isolate_toggle
-        )
-        self.claude_ni_cb.pack(anchor="w", pady=(0, 10))
+        self.claude_ks_cb.pack(anchor="w", pady=(4, 10))
 
         # Детали маршрута
         details_frame = tk.Frame(pad, bg=C["card_inner"], bd=1, relief="solid")
@@ -1054,6 +1093,12 @@ class HerdrConfigApp(tk.Tk):
             r4, text="claude-3-7-sonnet • claude-3-5-sonnet • claude-3-5-haiku • claude-code",
             font=FONT_MAIN, fg=C["tag_fg"], bg=C["card_inner"]
         ).pack(side="left")
+
+        try:
+            iso_res = claude_manager.check_claude_isolation()
+            self._update_claude_iso_ui(iso_res)
+        except Exception:
+            pass
 
         return card
 
@@ -1098,22 +1143,189 @@ class HerdrConfigApp(tk.Tk):
                 self.claude_port_var.set(parts[1])
                 self._save_claude_settings_action()
 
-    def _on_claude_killswitch_toggle(self):
+    def _on_toggle_claude_restriction(self):
+        """Переключает ограничение узлов Type-B на выделенный сокет (Off / On)."""
+        current = bool(self.claude_restriction_var.get())
+        if current:
+            # Пользователь пытается выключить ограничение: показываем предупреждение
+            p = settings_manager.get_claude_proxy_port()
+            title = t("claude_restr_off_confirm_title")
+            msg = t("claude_restr_off_confirm_msg", port=p)
+            confirm = messagebox.askyesno(title, msg, icon="warning", default="no", parent=self)
+            if not confirm:
+                # Отмена действия: оставляем флаг включенным
+                return
+
+        new_val = not current
+        self.claude_restriction_var.set(new_val)
+
+        # Вызываем логику переключения в claude_manager (синхронизация settings.json + брандмауэр)
+        res = claude_manager.set_claude_restriction(new_val)
+
+        # Обновляем кнопку переключения
+        if hasattr(self, "claude_restr_btn"):
+            if new_val:
+                self.claude_restr_btn.config(
+                    text=t("btn_claude_restriction_on"),
+                    bg=C["green"],
+                    fg="#11111b"
+                )
+            else:
+                self.claude_restr_btn.config(
+                    text=t("btn_claude_restriction_off"),
+                    bg=C["border"],
+                    fg=C["subtext"]
+                )
+
+        # Обновляем бейдж изоляции
+        self._update_claude_iso_ui(res)
+
+        # Перезапускаем синхронизацию и проверку маршрутов
         self._save_claude_settings_action()
 
-    def _on_claude_node_isolate_toggle(self):
+    def _on_check_claude_isolation(self):
+        """Открывает диалоговое окно живой проверки сетевой изоляции и DNS узлов Type-B."""
+        self._show_claude_isolation_dialog()
+
+    def _show_claude_isolation_dialog(self):
+        """Всплывающее окно с живыми логами проверки сетевой изоляции и DNS узлов Type-B."""
+        dlg = tk.Toplevel(self)
+        dlg.title(t("claude_isolation_modal_title"))
+        dlg.geometry("860x600")
+        dlg.minsize(740, 480)
+        dlg.configure(bg=C["bg"])
+
+        # Заголовок и текущий бейдж статуса
+        top_f = tk.Frame(dlg, bg=C["bg"])
+        top_f.pack(fill="x", padx=16, pady=(14, 8))
+
+        tk.Label(
+            top_f, text="🛡️ Аудит изоляции и защиты от утечек (WSL2 & Windows)",
+            font=FONT_TITLE, fg=C["accent_blue"], bg=C["bg"]
+        ).pack(side="left")
+
+        dlg_badge = tk.Label(
+            top_f,
+            text=self.claude_iso_badge.cget("text") if hasattr(self, "claude_iso_badge") else "[...]",
+            font=FONT_BOLD,
+            fg=C["green"] if settings_manager.get_claude_restriction_enabled() else C["subtext"],
+            bg=C["bg"]
+        )
+        dlg_badge.pack(side="right")
+
+        # Панель управления (Запуск, Копирование, Закрыть)
+        bar = tk.Frame(dlg, bg=C["bg"])
+        bar.pack(fill="x", padx=16, pady=(0, 8))
+
+        card_wrap = tk.Frame(dlg, bg=C["card"], bd=1, relief="solid")
+        card_wrap.configure(highlightbackground=C["border"], highlightthickness=1)
+        card_wrap.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+
+        txt = tk.Text(
+            card_wrap, bg="#11111b", fg=C["fg"], insertbackground=C["fg"],
+            selectbackground=C["border"], font=FONT_MONO, wrap="word",
+            relief="flat", bd=0, padx=12, pady=12
+        )
+        sc = ttk.Scrollbar(card_wrap, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=sc.set)
+        txt.pack(side="left", fill="both", expand=True)
+        sc.pack(side="right", fill="y")
+
+        txt.tag_config("TIMESTAMP", foreground="#6c7086")
+        txt.tag_config("INFO", foreground="#cdd6f4")
+        txt.tag_config("SUCCESS", foreground=C["green"])
+        txt.tag_config("WARN", foreground=C["yellow"])
+        txt.tag_config("ERROR", foreground=C["red"])
+        txt.tag_config("STEP", foreground=C["accent_blue"], font=FONT_MONO_BOLD)
+
+        def append_log(level: str, line: str):
+            def _gui_append():
+                if not dlg.winfo_exists():
+                    return
+                txt.config(state="normal")
+                txt.insert("end", line + "\n", level)
+                txt.see("end")
+                txt.config(state="disabled")
+            self.after(0, _gui_append)
+
+        def start_audit():
+            btn_run.config(state="disabled", text="⏳ Проверка...")
+            txt.config(state="normal")
+            txt.delete("1.0", "end")
+            txt.config(state="disabled")
+
+            def worker():
+                try:
+                    res = claude_manager.run_isolation_diagnostic(log_callback=append_log)
+                    iso_fresh = claude_manager.check_claude_isolation()
+                    self._update_claude_iso_ui(iso_fresh)
+                    if dlg.winfo_exists():
+                        def update_badge():
+                            badge_val = res.get("status", "unknown")
+                            if badge_val == "isolated":
+                                dlg_badge.config(text="🟢 WSL2 ИЗОЛИРОВАН (:1015)", fg=C["green"])
+                            elif badge_val == "direct":
+                                dlg_badge.config(text="⚪ ВЫКЛ (Прямой доступ)", fg=C["subtext"])
+                            else:
+                                dlg_badge.config(text="🟡 ПРЕДУПРЕЖДЕНИЕ", fg=C["yellow"])
+                        self.after(0, update_badge)
+                except Exception as e:
+                    append_log("ERROR", f"Критическая ошибка аудита: {e}")
+                finally:
+                    if dlg.winfo_exists():
+                        self.after(0, lambda: btn_run.config(state="normal", text=t("btn_run_isolation_check")))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def copy_logs():
+            content = txt.get("1.0", "end").strip()
+            self.clipboard_clear()
+            self.clipboard_append(content)
+            from tkinter import messagebox
+            messagebox.showinfo(t("app_name"), t("msg_copied_clipboard"), parent=dlg)
+
+        btn_run = tk.Button(
+            bar, text=t("btn_run_isolation_check"), font=FONT_BOLD,
+            bg=C["accent_blue"], fg="#11111b", activebackground="#b4befe",
+            bd=0, padx=12, pady=5, cursor="hand2", command=start_audit
+        )
+        btn_run.pack(side="left", padx=(0, 6))
+
+        btn_copy = tk.Button(
+            bar, text=t("btn_copy_logs"), font=FONT_MAIN,
+            bg=C["card_inner"], fg=C["fg"], activebackground=C["border"],
+            bd=0, padx=12, pady=5, cursor="hand2", command=copy_logs
+        )
+        btn_copy.pack(side="left", padx=6)
+
+        btn_close = tk.Button(
+            bar, text=t("btn_close_dialog"), font=FONT_MAIN,
+            bg=C["card_inner"], fg=C["subtext"], activebackground=C["border"],
+            bd=0, padx=12, pady=5, cursor="hand2", command=dlg.destroy
+        )
+        btn_close.pack(side="right")
+
+        # При открытии диалога сразу запускаем проверку
+        dlg.after(100, start_audit)
+
+    def _update_claude_iso_ui(self, res: dict):
+        """Обновляет индикаторы бейджа сетевой изоляции узлов Type-B в UI."""
+        if not hasattr(self, "claude_iso_badge"):
+            return
+        badge_text = res.get("badge", "[Unknown]")
+        level = str(res.get("status", res.get("level", "unknown"))).lower()
+        if level in ("isolated", "full"):
+            color = C["green"]
+        elif level in ("partial", "warning"):
+            color = C["accent_peach"]
+        elif level in ("direct", "off", "open"):
+            color = C["subtext"]
+        else:
+            color = C["red"]
+        self.claude_iso_badge.config(text=badge_text, fg=color)
+
+    def _on_claude_killswitch_toggle(self):
         self._save_claude_settings_action()
-        import node_isolate_manager
-        import settings_manager
-        h = settings_manager.get_claude_proxy_host()
-        p = settings_manager.get_claude_proxy_port()
-        is_on = settings_manager.get_claude_node_isolate()
-        # Force immediate apply so to avoid 20 sec waiting rule
-        try:
-            node_isolate_manager.enforce_isolation(h, p, is_on)
-        except Exception as e:
-            import traceback, logging
-            logging.error(f"SILENT CRASH IN ENFORCE_ISOLATION: {e}\n{traceback.format_exc()}")
 
     def _save_claude_settings_action(self):
         h = self.claude_host_var.get().strip()
@@ -1122,18 +1334,16 @@ class HerdrConfigApp(tk.Tk):
         except ValueError:
             return
         ks = bool(self.claude_killswitch_var.get())
-        ni = getattr(self, "claude_node_isolate_var", None)
-        ni_val = bool(ni.get()) if ni else False
+        restr = getattr(self, "claude_restriction_var", None)
+        restr_val = bool(restr.get()) if restr is not None else None
         self._last_claude_accessible = None
-        settings_manager.set_claude_proxy_settings(h, p, ks, ni_val)
-        claude_manager.save_claude_config(h, p, ks)
+        settings_manager.set_claude_proxy_settings(h, p, ks, False, restriction_enabled=restr_val)
+        claude_manager.save_claude_config(h, p, ks, restriction_enabled=restr_val)
         proxy_manager.set_proxy_claude_flag(p, True)
         self.proxies = proxy_manager.load_proxies()
         self.claude_route_lbl.config(text=f"http://{h}:{10000 + p} (SOCKS5 :{p})")
         if hasattr(self, "claude_ks_cb"):
             self.claude_ks_cb.config(fg=C["red"] if ks else C["subtext"])
-        if hasattr(self, "claude_ni_cb"):
-            self.claude_ni_cb.config(fg=C["accent_peach"] if ni_val else C["subtext"])
         self.refresh_routes_async()
 
 
@@ -1335,9 +1545,14 @@ class HerdrConfigApp(tk.Tk):
                 bg=bg_color, width=17, anchor="w"
             ).pack(side="left", padx=4)
 
-            # 4. Страна (при невозможности определить — строго undefined!)
-            country_str = item.get("country") or "undefined"
-            c_color = C["tag_fg"] if country_str != "undefined" else C["yellow"]
+            # 4. Страна (при offline или неопределенной стране — аккуратный прочерк '-' без кричащего yellow 'undefined')
+            raw_country = item.get("country")
+            if status == "offline" or not raw_country or str(raw_country).lower() in ("undefined", "-", "none", ""):
+                country_str = "-"
+                c_color = C["subtext"]
+            else:
+                country_str = str(raw_country)
+                c_color = C["tag_fg"]
             tk.Label(
                 row, text=country_str, font=FONT_MAIN,
                 fg=c_color, bg=bg_color, width=18, anchor="w"
@@ -1351,13 +1566,13 @@ class HerdrConfigApp(tk.Tk):
                 fg=C["subtext"], bg=bg_color, width=10, anchor="center"
             ).pack(side="left", padx=4)
 
-            # 6. Флаг Claude
+            # 6. Флаг Type-B
             claude_frame = tk.Frame(row, bg=bg_color, width=10)
             claude_frame.pack(side="left", padx=4)
             is_claude = bool(item.get("claude", False))
             claude_var = tk.BooleanVar(value=is_claude)
             cb_claude = tk.Checkbutton(
-                claude_frame, text="Claude",
+                claude_frame, text=t("col_claude"),
                 variable=claude_var,
                 font=FONT_BOLD,
                 fg=C["accent_peach"] if is_claude else C["subtext"],
@@ -1389,7 +1604,7 @@ class HerdrConfigApp(tk.Tk):
             btn_del.pack(side="left")
 
     def on_toggle_proxy_claude(self, proxy_item: dict, var: tk.BooleanVar):
-        """Переключение флага Claude для прокси."""
+        """Переключение флага привязки сокета для узлов Type-B."""
         val = bool(var.get())
         proxy_item["claude"] = val
         port = proxy_item.get("port")
@@ -1399,7 +1614,7 @@ class HerdrConfigApp(tk.Tk):
                 break
         proxy_manager.save_proxies(self.proxies)
 
-        # Если включили флаг Claude для прокси, обновляем настройки Claude на карточке Routes
+        # Если включили флаг выделенного сокета Type-B, обновляем настройки маршрута на вкладке Routes
         if val:
             self._last_claude_accessible = None
             h = proxy_item.get("host", "127.0.0.1")
@@ -1412,7 +1627,7 @@ class HerdrConfigApp(tk.Tk):
                 self.claude_port_var.set(str(p_num))
             self._update_claude_proxy_combo()
             self.refresh_routes_async()
-            # Прокси с флагом Claude строго не должны использоваться в Gemini:
+            # Сетевые сокеты узлов Type-B строго изолируются от ансамбля Type-A:
             gemini_manager.reassign_profiles_using_claude_proxies()
             if hasattr(self, "load_gemini_profiles_data"):
                 self.load_gemini_profiles_data()
@@ -1503,10 +1718,10 @@ class HerdrConfigApp(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     # =========================================================================
-    # СТРАНИЦА 3: GEMINI OAUTH
+    # СТРАНИЦА 3: СЕССИИ И ПРОФИЛИ УЗЛОВ TYPE-A
     # =========================================================================
     def _build_page_gemini(self, parent: tk.Frame):
-        # Верхняя панель Gemini
+        # Верхняя панель профилей Type-A
         g_top = tk.Frame(parent, bg=C["bg"])
         g_top.pack(fill="x", pady=(0, 10))
 
@@ -1514,18 +1729,42 @@ class HerdrConfigApp(tk.Tk):
         title_frame.pack(side="left")
 
         tk.Label(
-            title_frame, text="🔮 Google Gemini OAuth2 Профили", font=FONT_TITLE,
+            title_frame, text=t("gemini_title"), font=FONT_TITLE,
             fg=C["accent_blue"], bg=C["bg"]
         ).pack(anchor="w")
 
         tk.Label(
             title_frame,
-            text="Использование лимитов Google AI Pro через OAuth (БЕЗ API-ключей!). Мгновенная смена аккаунтов.",
+            text=t("gemini_subtitle"),
             font=FONT_SUB, fg=C["subtext"], bg=C["bg"]
         ).pack(anchor="w")
 
         btn_box = tk.Frame(g_top, bg=C["bg"])
         btn_box.pack(side="right")
+
+        self.btn_check_all_gemini = tk.Button(
+            btn_box, text=t("btn_check_all_gemini"), font=FONT_BOLD,
+            bg=C["card_inner"], fg=C["accent_blue"], activebackground=C["border"],
+            bd=0, padx=10, pady=6, cursor="hand2",
+            command=self.on_check_all_gemini_tokens
+        )
+        self.btn_check_all_gemini.pack(side="left", padx=(0, 8))
+
+        self.gemini_check_status_frame = tk.Frame(btn_box, bg=C["bg"])
+        self.gemini_check_timer_lbl = tk.Label(
+            self.gemini_check_status_frame, text="⏱️ 0с", font=FONT_BOLD,
+            fg=C["accent_peach"], bg=C["bg"]
+        )
+        self.gemini_check_timer_lbl.pack(side="left", padx=(0, 4))
+
+        self.btn_cancel_gemini_check = tk.Button(
+            self.gemini_check_status_frame, text=" ❌ ", font=FONT_BOLD,
+            bg=C["card_inner"], fg=C["red"], activebackground=C["border"],
+            bd=0, padx=6, pady=4, cursor="hand2",
+            command=self.on_cancel_gemini_check
+        )
+        self.btn_cancel_gemini_check.pack(side="left", padx=(0, 4))
+        # gemini_check_status_frame is packed dynamically when checking starts
 
         self.btn_reset_order = tk.Button(
             btn_box, text=t("btn_reset_proxies_order"), font=FONT_BOLD,
@@ -1654,14 +1893,40 @@ class HerdrConfigApp(tk.Tk):
             font=FONT_BOLD, fg=C["fg"], bg=C["bg"]
         ).pack(anchor="w", pady=(4, 6))
 
-        self.gemini_profiles_scroll = tk.Frame(parent, bg=C["bg"])
-        self.gemini_profiles_scroll.pack(fill="both", expand=True)
+        # Контейнер для карточек профилей со скроллом
+        canvas_card = tk.Frame(parent, bg=C["card"], bd=1, relief="solid")
+        canvas_card.configure(highlightbackground=C["border"], highlightthickness=1)
+        canvas_card.pack(fill="both", expand=True)
 
-        self.gemini_cards_container = tk.Frame(self.gemini_profiles_scroll, bg=C["bg"])
-        self.gemini_cards_container.pack(fill="both", expand=True)
+        self.gemini_canvas = tk.Canvas(canvas_card, bg=C["bg"], highlightthickness=0)
+        self.gemini_scrollbar = ttk.Scrollbar(canvas_card, orient="vertical", command=self.gemini_canvas.yview)
+        self.gemini_cards_container = tk.Frame(self.gemini_canvas, bg=C["bg"])
+
+        self.gemini_cards_container.bind(
+            "<Configure>",
+            lambda e: self.gemini_canvas.configure(scrollregion=self.gemini_canvas.bbox("all"))
+        )
+        self.gemini_window_id = self.gemini_canvas.create_window((0, 0), window=self.gemini_cards_container, anchor="nw")
+        self.gemini_canvas.bind("<Configure>", lambda e: self.gemini_canvas.itemconfig(self.gemini_window_id, width=e.width))
+
+        self.gemini_canvas.configure(yscrollcommand=self.gemini_scrollbar.set)
+        self.gemini_canvas.pack(side="left", fill="both", expand=True, padx=2, pady=2)
+        self.gemini_scrollbar.pack(side="right", fill="y")
+
+        def _on_gemini_mousewheel(event):
+            try:
+                if self.gemini_canvas.winfo_exists():
+                    self.gemini_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            except Exception:
+                pass
+
+        self.gemini_canvas.bind("<Enter>", lambda _: self.gemini_canvas.bind_all("<MouseWheel>", _on_gemini_mousewheel))
+        self.gemini_canvas.bind("<Leave>", lambda _: self.gemini_canvas.unbind_all("<MouseWheel>"))
+        self.gemini_cards_container.bind("<Enter>", lambda _: self.gemini_cards_container.bind_all("<MouseWheel>", _on_gemini_mousewheel))
+        self.gemini_cards_container.bind("<Leave>", lambda _: self.gemini_cards_container.unbind_all("<MouseWheel>"))
 
     def load_gemini_profiles_data(self):
-        """Загрузка профилей Gemini из WSL2."""
+        """Загрузка профилей сессий Type-A из WSL2."""
         self.gemini_profiles = gemini_manager.list_profiles()
         try:
             strategy_manager.seed_initial_history_if_empty(self.gemini_profiles, self.proxies)
@@ -1669,47 +1934,10 @@ class HerdrConfigApp(tk.Tk):
             pass
 
     def _check_and_update_vault_meta(self):
-        """Проверяет, нужно ли фоново обновить метаданные заблокированных токенов."""
-        import time
-        import token_vault_manager
-        import backup_manager
-        pw = backup_manager.load_backup_password()
-        if not pw or not token_vault_manager.is_vault_locked():
-            return
-            
-        now = time.time()
-        if now - token_vault_manager.LAST_GLOBAL_METADATA_UPDATE < 60:
-            return
-            
-        needs_update = False
-        
-        # Check Gemini
-        for p in getattr(self, 'gemini_profiles', []):
-            if p.get("is_locked") and (p.get("is_expired") or "Отсутствует" in p.get("email", "")):
-                needs_update = True
-                break
-                
-        # Check Claude
-        for cp in getattr(self, 'claude_profiles', []):
-            if cp.get("is_locked") and cp.get("is_expired"):
-                needs_update = True
-                break
-                
-        st = getattr(self, "claude_active_status", {})
-        if st and st.get("is_locked") and st.get("is_expired"):
-            needs_update = True
-
-        if needs_update:
-            try:
-                with token_vault_manager.auto_unlock_context():
-                    pass # Metadata updates automatically inside context hook
-                self.load_gemini_profiles_data()
-                self.load_claude_profiles_data()
-            except Exception:
-                pass
+        pass
 
     def render_gemini_page(self):
-        """Отрисовка карточек аккаунтов Gemini."""
+        """Отрисовка карточек профилей Type-A."""
         self._check_and_update_vault_meta()
         # 1. Обновляем карточку текущего активного аккаунта
         active_prof = next((p for p in self.gemini_profiles if p.get("is_active")), None)
@@ -1741,6 +1969,22 @@ class HerdrConfigApp(tk.Tk):
         else:
             self.guard_badge.config(text="⚪ " + t("lbl_guard_stopped"), bg=C["card_inner"], fg=C["subtext"])
             self.btn_toggle_guard.config(text=t("btn_start"), fg=C["green"])
+
+        # Обновляем состояние кнопки пакетной проверки и таймера
+        if getattr(self, "_gemini_batch_check_running", False):
+            try:
+                self.btn_check_all_gemini.config(state="disabled")
+                if hasattr(self, "gemini_check_status_frame") and not self.gemini_check_status_frame.winfo_ismapped():
+                    self.gemini_check_status_frame.pack(side="left", padx=(0, 8), before=self.btn_reset_order)
+            except Exception:
+                pass
+        else:
+            try:
+                self.btn_check_all_gemini.config(state="normal")
+                if hasattr(self, "gemini_check_status_frame") and self.gemini_check_status_frame.winfo_ismapped():
+                    self.gemini_check_status_frame.pack_forget()
+            except Exception:
+                pass
 
         # 2. Отрисовка списка профилей
         for widget in self.gemini_cards_container.winfo_children():
@@ -1913,6 +2157,14 @@ class HerdrConfigApp(tk.Tk):
             )
             btn_test.pack(side="left", padx=(0, 6))
 
+            btn_reauth = tk.Button(
+                right, text=t("btn_reauth_token"), font=FONT_MAIN,
+                bg=C["card_inner"], fg=C["accent_blue"], activebackground=C["border"],
+                bd=0, padx=8, pady=4, cursor="hand2",
+                command=lambda name=p_name: self.on_reauth_gemini_profile(name)
+            )
+            btn_reauth.pack(side="left", padx=(0, 6))
+
             btn_rename = tk.Button(
                 right, text="✏️", font=FONT_MAIN,
                 bg=C["card_inner"], fg=C["accent_blue"], activebackground=C["border"],
@@ -1975,8 +2227,9 @@ class HerdrConfigApp(tk.Tk):
         """Быстрое переключение активного профиля в 1 клик."""
         with token_vault_manager.auto_unlock_context():
             ok, msg = gemini_manager.switch_profile(profile_name)
+            if ok:
+                self.load_gemini_profiles_data()
         if ok:
-            self.load_gemini_profiles_data()
             self.render_gemini_page()
             # Обновляем также роутер
             self.refresh_routes_async()
@@ -1984,29 +2237,375 @@ class HerdrConfigApp(tk.Tk):
         else:
             messagebox.showerror("Ошибка", msg)
 
+    def on_reauth_gemini_profile(self, profile_name: str):
+        """Переавторизация и перезапись OAuth-токена для существующего профиля."""
+        if not messagebox.askyesno(
+            t("dlg_reauth_title"),
+            t("dlg_reauth_confirm", profile=profile_name)
+        ):
+            return
+
+        with token_vault_manager.auto_unlock_context():
+            launched = gemini_manager.launch_add_account_terminal(profile_name, overwrite=True)
+
+        if launched:
+            messagebox.showinfo(
+                t("dlg_reauth_title"),
+                t("msg_reauth_started", profile=profile_name)
+            )
+            self._start_token_update_watcher(profile_name)
+        else:
+            messagebox.showerror(t("error"), "Не удалось запустить терминал WSL.")
+
+    def _start_token_update_watcher(self, profile_name: str):
+        """Фоновый поллер ожидания нового/обновленного токена после авторизации в браузере."""
+        t_path = gemini_manager.PROFILES_DIR / profile_name / "antigravity-oauth-token"
+        initial_mtime = t_path.stat().st_mtime if t_path.exists() else 0.0
+
+        def check_loop(attempts_left: int):
+            if attempts_left <= 0:
+                return
+            if t_path.exists():
+                curr_mtime = t_path.stat().st_mtime
+                if curr_mtime > initial_mtime:
+                    try:
+                        with token_vault_manager.auto_unlock_context():
+                            self.load_gemini_profiles_data()
+                        self.render_gemini_page()
+                        self.status_var.set(f"✓ Токен профиля '{profile_name}' успешно перезаписан!")
+                    except Exception:
+                        pass
+                    return
+            self.after(2000, lambda: check_loop(attempts_left - 1))
+
+        self.after(2000, lambda: check_loop(90))
+
     def on_test_gemini_token(self, profile_name: str):
-        """Онлайн-проверка токена в Google API через персональный порт."""
+        """Проверка токена по тому же принципу, что и активация, без смены активного аккаунта."""
+        pos = "?"
+        for p in self.gemini_profiles:
+            if p.get("profile_name") == profile_name:
+                pos = str(p.get("position", "?"))
+                break
+
+        self.status_var.set(f"Проверка токена #{pos} {profile_name}...")
+
         def worker():
             res = gemini_manager.check_token_live(profile_name)
+
             def show_res():
+                self.status_var.set("Проверка токена завершена")
+                try:
+                    self.bring_to_front()
+                except Exception:
+                    pass
+                email = res.get("email") or profile_name
+                is_valid = res.get("valid", False)
+                status_str = t("status_token_works") if is_valid else t("status_token_broken")
                 port = res.get("port", gemini_manager.BASE_SOCKS5_PORT)
-                if res.get("valid"):
-                    messagebox.showinfo(
-                        "Google OAuth2 Валидация",
-                        f"✓ Токен активен и полностью валиден в Google API!\n\n"
-                        f"Google ID: {res.get('email')}\n"
-                        f"Выделенный порт: SOCKS5 127.0.0.1:{port}\n"
-                        f"Доступ: Полная квота Google AI Pro / Gemini Advanced"
-                    )
+                exp = res.get("expiry_text", "-")
+
+                # Строка в формате: #номер акка - Аккаунт - Токен работает или нет
+                result_line = f"#{pos} - {email} - {status_str}"
+
+                details = [result_line, ""]
+                details.append(f"• Профиль: {profile_name}")
+                if res.get("name") and res.get("name") != "-":
+                    details.append(f"• Имя: {res.get('name')}")
+                details.append(f"• Порт: SOCKS5 127.0.0.1:{port}")
+                if is_valid:
+                    details.append(f"• Срок действия: {exp}")
+                    if res.get("online_verified"):
+                        details.append("• Онлайн-проверка Google API: Подтверждена")
                 else:
-                    messagebox.showwarning(
-                        "Google OAuth2 Валидация",
-                        f"Токен недоступен или порт не отвечает:\n{res.get('error')}\n\n"
-                        f"Проверьте, что в Xray запущен inbound на порту {port}."
-                    )
+                    details.append(f"• Ошибка: {res.get('error') or 'Неизвестная ошибка'}")
+
+                msg_text = "\n".join(details)
+                if is_valid:
+                    messagebox.showinfo(t("dlg_token_check_title"), msg_text, parent=self)
+                else:
+                    messagebox.showwarning(t("dlg_token_check_title"), msg_text, parent=self)
+
             self.after(0, show_res)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def on_check_all_gemini_tokens(self):
+        """Пакетная фоновая проверка работоспособности токенов всех аккаунтов с таймером и кнопкой отмены."""
+        if getattr(self, "_gemini_batch_check_running", False):
+            return
+
+        self._gemini_batch_check_running = True
+        self._gemini_batch_cancel_event.clear()
+        self._gemini_batch_start_time = time.time()
+
+        try:
+            import extended_logger
+            extended_logger.write_ext_log("UI_EVENT", "Нажата кнопка 'Проверить все аккаунты'")
+        except Exception:
+            pass
+
+        # Блокируем кнопку запуска и отображаем секундомер с кнопкой отмены
+        try:
+            self.btn_check_all_gemini.config(state="disabled")
+            self.gemini_check_timer_lbl.config(text="⏱️ 0с")
+            self.gemini_check_status_frame.pack(side="left", padx=(0, 8), before=self.btn_reset_order)
+        except Exception:
+            pass
+
+        def tick():
+            if not getattr(self, "_gemini_batch_check_running", False):
+                return
+            elapsed = int(time.time() - self._gemini_batch_start_time)
+            try:
+                self.gemini_check_timer_lbl.config(text=f"⏱️ {elapsed}с")
+            except Exception:
+                pass
+            self._gemini_batch_timer_after_id = self.after(1000, tick)
+
+        self._gemini_batch_timer_after_id = self.after(1000, tick)
+
+        def progress_cb(done, total, res):
+            elapsed = int(time.time() - self._gemini_batch_start_time)
+            msg = t("lbl_checking_progress", done=done, total=total, elapsed=elapsed)
+            try:
+                self.after(0, lambda m=msg: self.status_var.set(m) if hasattr(self, "status_var") else None)
+            except Exception:
+                pass
+
+        def worker():
+            results = []
+            was_cancelled = False
+            try:
+                results = gemini_manager.check_all_tokens(
+                    cancel_event=self._gemini_batch_cancel_event,
+                    on_progress=progress_cb
+                )
+                was_cancelled = self._gemini_batch_cancel_event.is_set()
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+            finally:
+                # Гарантированный вызов завершения в GUI-потоке даже при исключениях
+                self.after(0, lambda res=results, canc=was_cancelled: self._on_gemini_batch_check_done(res, canc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_cancel_gemini_check(self):
+        """Отмена текущей пакетной проверки токенов."""
+        if getattr(self, "_gemini_batch_check_running", False):
+            self._gemini_batch_cancel_event.set()
+            try:
+                self.gemini_check_timer_lbl.config(text="⏱️ Отмена...")
+            except Exception:
+                pass
+
+    def _on_gemini_batch_check_done(self, results: list[dict], was_cancelled: bool):
+        """Завершение пакетной проверки токенов: остановка таймера и гарантированный вывод модального окна."""
+        self._gemini_batch_check_running = False
+        if getattr(self, "_gemini_batch_timer_after_id", None):
+            try:
+                self.after_cancel(self._gemini_batch_timer_after_id)
+            except Exception:
+                pass
+            self._gemini_batch_timer_after_id = None
+
+        try:
+            self.gemini_check_status_frame.pack_forget()
+            self.btn_check_all_gemini.config(state="normal")
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "status_var"):
+                self.status_var.set("Проверка токенов завершена")
+        except Exception:
+            pass
+
+        # Принудительно вызываем всплывающее модальное окно результатов
+        try:
+            self._show_gemini_batch_results_dialog(results, was_cancelled)
+        except Exception as e:
+            try:
+                import extended_logger
+                extended_logger.write_ext_log("ERROR", f"Ошибка открытия модального окна результатов: {e}")
+            except Exception:
+                pass
+
+    def _show_gemini_batch_results_dialog(self, results: list[dict], was_cancelled: bool):
+        """Модальное окно с результатами проверки всех Google-аккаунтов."""
+        try:
+            import extended_logger
+            extended_logger.write_ext_log("UI_EVENT", f"Отображение модального окна результатов проверки (аккаунтов: {len(results)}, отменено: {was_cancelled})")
+        except Exception:
+            pass
+
+        # 1. Если главное окно свернуто, восстанавливаем его
+        try:
+            self.bring_to_front()
+        except Exception:
+            pass
+
+        dlg = tk.Toplevel(self)
+        dlg.title(t("dlg_check_results_title"))
+        dlg.configure(bg=C["bg"])
+        dlg.transient(self)
+
+        # Центрирование окна с явным указанием геометрии 720x540
+        try:
+            self.update_idletasks()
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            x = self.winfo_x() + max(0, (self.winfo_width() - 720) // 2)
+            y = self.winfo_y() + max(0, (self.winfo_height() - 540) // 2)
+            if x < 10 or x > sw - 200:
+                x = max(10, (sw - 720) // 2)
+            if y < 10 or y > sh - 200:
+                y = max(10, (sh - 540) // 2)
+            dlg.geometry(f"720x540+{x}+{y}")
+        except Exception:
+            dlg.geometry("720x540")
+        dlg.minsize(620, 420)
+
+        # Вывод на передний план: держим topmost, пока окно открыто!
+        try:
+            dlg.deiconify()
+            dlg.lift()
+            dlg.attributes("-topmost", True)
+            dlg.focus_force()
+            dlg.after(350, lambda: dlg.attributes("-topmost", True) if dlg.winfo_exists() else None)
+            try:
+                import ctypes
+                hwnd = dlg.winfo_id()
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # Безопасный grab_set (чтобы модальность не ломалась, если окно еще не смапировано)
+        try:
+            dlg.grab_set()
+        except Exception:
+            dlg.after(100, lambda: dlg.grab_set() if dlg.winfo_exists() else None)
+
+        try:
+            self.bell()
+        except Exception:
+            pass
+
+        # Верхняя панель заголовка
+        top_f = tk.Frame(dlg, bg=C["bg"])
+        top_f.pack(fill="x", padx=16, pady=(14, 8))
+
+        tk.Label(
+            top_f, text="🔍 " + t("dlg_check_results_title"),
+            font=FONT_TITLE, fg=C["accent_blue"], bg=C["bg"]
+        ).pack(side="left")
+
+        total_count = len(results)
+        valid_count = sum(1 for r in results if r.get("valid"))
+        stats_text = f"Работает: {valid_count} из {total_count}"
+        if was_cancelled:
+            stats_text += f" (отменено)"
+
+        tk.Label(
+            top_f, text=stats_text,
+            font=FONT_BOLD,
+            fg=C["green"] if valid_count == total_count and not was_cancelled else C["accent_peach"],
+            bg=C["bg"]
+        ).pack(side="right")
+
+        # Текстовое поле с результатами в требуемом формате:
+        # #номер акка - Аккаунт - Токен работает или нет
+        card_wrap = tk.Frame(dlg, bg=C["card"], bd=1, relief="solid")
+        card_wrap.configure(highlightbackground=C["border"], highlightthickness=1)
+        card_wrap.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+
+        txt = tk.Text(
+            card_wrap, bg="#11111b", fg=C["fg"], insertbackground=C["fg"],
+            selectbackground=C["border"], font=FONT_MAIN, wrap="word",
+            relief="flat", bd=0, padx=14, pady=12
+        )
+        sc = ttk.Scrollbar(card_wrap, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=sc.set)
+        sc.pack(side="right", fill="y")
+        txt.pack(side="left", fill="both", expand=True)
+
+        txt.tag_config("valid", foreground=C["green"], font=FONT_BOLD)
+        txt.tag_config("invalid", foreground=C["red"], font=FONT_BOLD)
+        txt.tag_config("dim", foreground=C["subtext"], font=FONT_SUB)
+
+        lines_to_copy = []
+        if was_cancelled:
+            cancel_hdr = f"⚠️ {t('msg_check_cancelled')} (проверено {total_count})\n\n"
+            txt.insert("end", cancel_hdr, "dim")
+            lines_to_copy.append(f"⚠️ {t('msg_check_cancelled')}\n")
+
+        if not results:
+            txt.insert("end", "Нет проверенных аккаунтов.\n", "dim")
+
+        for idx, r in enumerate(results, start=1):
+            pos = r.get("position", idx)
+            email = r.get("email") or r.get("profile_name", f"account-{pos}")
+            is_valid = r.get("valid", False)
+            status_text = t("status_token_works") if is_valid else t("status_token_broken")
+
+            line_str = f"#{pos} - {email} - {status_text}"
+            lines_to_copy.append(line_str)
+
+            txt.insert("end", f"#{pos} - {email} - ")
+            txt.insert("end", f"{status_text}\n", "valid" if is_valid else "invalid")
+
+            details = []
+            if r.get("port"):
+                details.append(f"SOCKS5 :{r['port']}")
+            if r.get("expiry_text"):
+                details.append(r["expiry_text"])
+            if not is_valid and r.get("error"):
+                details.append(f"Причина: {r['error']}")
+            if details:
+                txt.insert("end", f"     └─ {' • '.join(details)}\n", "dim")
+            txt.insert("end", "\n")
+
+        txt.configure(state="disabled")
+
+        # Нижняя панель с кнопками
+        b_bar = tk.Frame(dlg, bg=C["bg"])
+        b_bar.pack(fill="x", padx=16, pady=(0, 14))
+
+        def _close_dlg():
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            dlg.destroy()
+
+        dlg.protocol("WM_DELETE_WINDOW", _close_dlg)
+
+        def copy_to_clipboard():
+            raw_text = "\n".join(lines_to_copy)
+            dlg.clipboard_clear()
+            dlg.clipboard_append(raw_text)
+            try:
+                if hasattr(self, "status_var"):
+                    self.status_var.set("Результаты проверки скопированы в буфер обмена")
+            except Exception:
+                pass
+
+        btn_copy = tk.Button(
+            b_bar, text="📋 Копировать отчет", font=FONT_BOLD,
+            bg=C["card_inner"], fg=C["accent_blue"], activebackground=C["border"],
+            bd=0, padx=12, pady=6, cursor="hand2", command=copy_to_clipboard
+        )
+        btn_copy.pack(side="left")
+
+        btn_close = tk.Button(
+            b_bar, text="Закрыть", font=FONT_BOLD,
+            bg=C["card_inner"], fg=C["fg"], activebackground=C["border"],
+            bd=0, padx=16, pady=6, cursor="hand2", command=_close_dlg
+        )
+        btn_close.pack(side="right")
 
     def on_add_google_account(self):
         """Запуск терминала для входа в новый аккаунт Google."""
@@ -2028,7 +2627,7 @@ class HerdrConfigApp(tk.Tk):
         p_name = p_name.strip()
         # Пересчитываем порт для фактического имени профиля
         actual_port = gemini_manager._calculate_default_sequential_port(p_name)
-        # Резервируем порт заранее, чтобы gemini-oauth в WSL использовал именно его
+        # Резервируем порт заранее, чтобы сессия узла в WSL использовала именно его
         gemini_manager.reserve_new_profile_port(p_name, actual_port)
 
         with token_vault_manager.auto_unlock_context():
@@ -2110,7 +2709,8 @@ class HerdrConfigApp(tk.Tk):
 
     def on_rotate_next_profile(self):
         """Ручная ротация на следующий профиль по кругу (Round-Robin)."""
-        ok, msg = gemini_manager.switch_next_profile()
+        with token_vault_manager.auto_unlock_context():
+            ok, msg = gemini_manager.switch_next_profile()
         if ok:
             self.load_gemini_profiles_data()
             self.render_gemini_page()
@@ -2125,16 +2725,17 @@ class HerdrConfigApp(tk.Tk):
             try:
                 import token_vault_manager
                 with token_vault_manager.auto_unlock_context():
-                    pass # Принудительно разблокируем и обновляем метаданные
+                    # Загружаем данные ВНУТРИ контекста, пока vault открыт
+                    self.load_gemini_profiles_data()
             except Exception:
-                pass
-            self.load_gemini_profiles_data()
+                # Fallback: грузим данные без vault (по кешу метаданных)
+                self.load_gemini_profiles_data()
             self.after(0, self.render_gemini_page)
 
         threading.Thread(target=worker, daemon=True).start()
 
     # =========================================================================
-    # СТРАНИЦА: CLAUDE OAUTH
+    # СТРАНИЦА: СЕССИИ И ПРОФИЛИ УЗЛОВ TYPE-B
     # =========================================================================
     def _build_page_claude_oauth(self, parent: tk.Frame):
         self.claude_profiles = []
@@ -2173,7 +2774,7 @@ class HerdrConfigApp(tk.Tk):
             command=self.on_add_claude_account
         ).pack(side="left")
 
-        # Карточка прокси (строго Anthropic Claude Proxy со страницы Routes)
+        # Карточка сокета маршрутизации (выделенный сокет узла Type-B со страницы Routes)
         px_card = tk.Frame(parent, bg=C["card"], bd=1, relief="solid")
         px_card.configure(highlightbackground=C["border"], highlightthickness=1)
         px_card.pack(fill="x", pady=(0, 12))
@@ -2230,7 +2831,7 @@ class HerdrConfigApp(tk.Tk):
         self.claude_cards_container.pack(fill="both", expand=True)
 
     def load_claude_profiles_data(self):
-        """Загрузка профилей Claude OAuth из WSL2."""
+        """Загрузка профилей сессий Type-B из WSL2."""
         try:
             self.claude_profiles = claude_oauth_manager.list_profiles()
             self.claude_active_status = claude_oauth_manager.get_active_status()
@@ -2256,7 +2857,7 @@ class HerdrConfigApp(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def render_claude_oauth_page(self):
-        """Отрисовка вкладки Claude OAuth."""
+        """Отрисовка вкладки сессий Type-B."""
         self._check_and_update_vault_meta()
         px = claude_oauth_manager.get_claude_oauth_proxy()
         online = getattr(self, "claude_proxy_online", False)
@@ -2327,7 +2928,7 @@ class HerdrConfigApp(tk.Tk):
                      fg=C["accent_mauve"], bg=C["tag_bg"], padx=6, pady=1).pack(side="left", padx=(8, 0))
 
             tk.Label(
-                left, text=f"Claude ID: {prof.get('email')} ({prof.get('name')})",
+                left, text=f"Session ID: {prof.get('email')} ({prof.get('name')})",
                 font=FONT_MAIN, fg=C["subtext"], bg=C["card"]
             ).pack(anchor="w", pady=(3, 0))
 
@@ -2374,7 +2975,7 @@ class HerdrConfigApp(tk.Tk):
             ).pack(side="left")
 
     def on_add_claude_account(self):
-        """Вход в новый аккаунт Claude через терминал WSL (строго через Claude Proxy)."""
+        """Вход в новую сессию Type-B через терминал WSL (строго через выделенный сокет)."""
         px = claude_oauth_manager.get_claude_oauth_proxy()
         p_name = simpledialog.askstring(
             t("dlg_claude_new_account"),
@@ -2813,37 +3414,6 @@ class HerdrConfigApp(tk.Tk):
             font=FONT_SUB, fg=C["subtext"], bg=C["card"]
         ).pack(anchor="w", pady=(4, 0))
 
-        # ── 1.b. Хранилище токенов ─────────────────────────────
-        vault_card = tk.Frame(parent, bg=C["card"], bd=1, relief="solid")
-        vault_card.configure(highlightbackground=C["border"], highlightthickness=1)
-        vault_card.pack(fill="x", pady=(0, 10))
-
-        v_in = tk.Frame(vault_card, bg=C["card"])
-        v_in.pack(fill="both", expand=True, padx=14, pady=10)
-
-        # Статус
-        is_locked = token_vault_manager.is_vault_locked()
-        v_status = t("vault_locked_status") if is_locked else t("vault_unlocked_status")
-        v_color = C["accent_peach"] if is_locked else C["accent_blue"]
-        
-        self.vault_lbl = tk.Label(v_in, text=f"{t('vault_title')}: {v_status}", font=FONT_BOLD, fg=v_color, bg=C["card"])
-        self.vault_lbl.pack(side="left")
-
-        # Кнопки
-        tk.Button(
-            v_in, text=t("btn_lock_vault"), font=FONT_MAIN,
-            bg=C["card_inner"], fg=C["accent_peach"], activebackground=C["border"],
-            bd=0, padx=10, pady=4, cursor="hand2",
-            command=self.on_vault_lock
-        ).pack(side="right", padx=(10, 0))
-
-        tk.Button(
-            v_in, text=t("btn_unlock_vault"), font=FONT_MAIN,
-            bg=C["card_inner"], fg=C["accent_blue"], activebackground=C["border"],
-            bd=0, padx=10, pady=4, cursor="hand2",
-            command=self.on_vault_unlock
-        ).pack(side="right")
-
         # ── 2. Панель параметров хранения и расписания ─────────
         cfg_card = tk.Frame(parent, bg=C["card"], bd=1, relief="solid")
         cfg_card.configure(highlightbackground=C["border"], highlightthickness=1)
@@ -2968,31 +3538,6 @@ class HerdrConfigApp(tk.Tk):
         )
         self.btn_wipe_data.pack(side="right")
 
-    def on_vault_lock(self):
-        pw = self.backup_password_var.get()
-        if not pw:
-            messagebox.showwarning(t("error"), t("err_pw_lock"))
-            return
-            
-        success, msg = token_vault_manager.lock_tokens(pw)
-        if success:
-            messagebox.showinfo(t("success"), t("vault_lock_success"))
-            self.render_backup_page()
-        else:
-            messagebox.showerror(t("error"), t("vault_lock_error"))
-
-    def on_vault_unlock(self):
-        pw = self.backup_password_var.get()
-        if not pw:
-            messagebox.showwarning(t("error"), t("err_pw_unlock"))
-            return
-            
-        success, msg = token_vault_manager.unlock_tokens(pw)
-        if success:
-            messagebox.showinfo(t("success"), t("vault_unlock_success"))
-            self.render_backup_page()
-        else:
-            messagebox.showerror(t("error"), t("vault_unlock_error"))
 
     def on_wipe_all_data(self):
         """Полная очистка всех данных программы с подтверждением."""
@@ -3222,7 +3767,7 @@ class HerdrConfigApp(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     # =========================================================================
-    # СТРАНИЦА: ИНТЕГРАЦИИ (AionUi, OmniRoute, Claude Code, Gemini Farm)
+    # СТРАНИЦА: ИНТЕГРАЦИИ (AionUi, OmniRoute, Type-B Nodes, Type-A Cluster)
     # =========================================================================
     def _build_page_integrations(self, parent: tk.Frame):
         """Построение вкладки Интеграции."""
@@ -3287,7 +3832,7 @@ class HerdrConfigApp(tk.Tk):
         self.badge_omniroute.configure(highlightbackground=C["border"], highlightthickness=1)
         self.badge_omniroute.pack(side="left", padx=6, expand=True, fill="x")
 
-        # 3. Claude Code :1015
+        # 3. Type-B Node :1015
         self.badge_claude = tk.Label(
             st_frame, text="Claude (:1015): ● ...", font=FONT_SUB,
             bg=C["card_inner"], fg=C["subtext"], padx=8, pady=4, bd=1, relief="solid"
@@ -3295,9 +3840,9 @@ class HerdrConfigApp(tk.Tk):
         self.badge_claude.configure(highlightbackground=C["border"], highlightthickness=1)
         self.badge_claude.pack(side="left", padx=6, expand=True, fill="x")
 
-        # 4. Gemini Farm :1081+
+        # 4. Type-A Ensemble :1081+
         self.badge_gemini = tk.Label(
-            st_frame, text="Gemini Farm: ● ...", font=FONT_SUB,
+            st_frame, text="Gemini Cluster: ● ...", font=FONT_SUB,
             bg=C["card_inner"], fg=C["subtext"], padx=8, pady=4, bd=1, relief="solid"
         )
         self.badge_gemini.configure(highlightbackground=C["border"], highlightthickness=1)
@@ -3467,7 +4012,7 @@ class HerdrConfigApp(tk.Tk):
             self.on_integrations_status_click()
 
     def on_integrations_status_click(self):
-        """Запуск комплексной проверки статуса AionUi, OmniRoute, Claude и Gemini."""
+        """Запуск комплексной проверки статуса AionUi, OmniRoute и рабочих узлов Type-A/Type-B."""
         if getattr(self, "_integ_task_running", False):
             return
         self._integ_task_running = True
@@ -3510,7 +4055,7 @@ class HerdrConfigApp(tk.Tk):
         else:
             self.badge_omniroute.config(text="OmniRoute (:20128): ● OFFLINE", fg=C["red"])
 
-        # 3. Claude
+        # 3. Worker Node Type-B
         claude = res.get("claude", {})
         c_socks = claude.get("socks5_1015", False)
         c_auth = claude.get("oauth", {}).get("authorized", False)
@@ -3522,16 +4067,16 @@ class HerdrConfigApp(tk.Tk):
         else:
             self.badge_claude.config(text="Claude (:1015): ● OFFLINE", fg=C["red"])
 
-        # 4. Gemini
+        # 4. Ensemble Cluster Type-A
         gemini = res.get("gemini", {})
         act_ports = gemini.get("active_ports", [])
         tot_prof = gemini.get("total_profiles", 0)
         if act_ports:
-            self.badge_gemini.config(text=f"Gemini Farm: ● {len(act_ports)}/{tot_prof} Online", fg=C["green"])
+            self.badge_gemini.config(text=f"Gemini Cluster: ● {len(act_ports)}/{tot_prof} Online", fg=C["green"])
         elif tot_prof > 0:
-            self.badge_gemini.config(text=f"Gemini Farm: ● 0/{tot_prof} Offline", fg=C["yellow"])
+            self.badge_gemini.config(text=f"Gemini Cluster: ● 0/{tot_prof} Offline", fg=C["yellow"])
         else:
-            self.badge_gemini.config(text="Gemini Farm: ● 0 Profiles", fg=C["subtext"])
+            self.badge_gemini.config(text="Gemini Cluster: ● 0 Profiles", fg=C["subtext"])
 
         # Overall badge
         all_ok = aion.get("online") and omni.get("online") and c_socks and bool(act_ports)
@@ -3541,12 +4086,12 @@ class HerdrConfigApp(tk.Tk):
             self.lbl_integ_overall.config(text="PARTIAL", bg=C["yellow"], fg="#11111b")
 
     def on_integrations_sync_claude_click(self):
-        """Диагностика Claude Code."""
+        """Диагностика узлов Type-B."""
         if getattr(self, "_integ_task_running", False):
             return
         self._integ_task_running = True
         self.btn_integ_sync_claude.config(state="disabled", text="⏳ Диагностика...")
-        self.lbl_integ_overall.config(text="CLAUDE DIAGNOSTICS...", bg=C["accent_peach"], fg="#11111b")
+        self.lbl_integ_overall.config(text="TYPE-B DIAGNOSTICS...", bg=C["accent_peach"], fg="#11111b")
 
         def worker():
             try:
@@ -3562,9 +4107,9 @@ class HerdrConfigApp(tk.Tk):
                 
                 # Показываем таблицу
                 if res.get("success"):
-                    msg = "ОТЧЕТ ПО СТАТУСУ CLAUDE CODE\n"
+                    msg = "ОТЧЕТ ПО СТАТУСУ CLAUDE\n"
                     msg += "-"*40 + "\n"
-                    msg += f"Токен Claude (OAuth): {'АВТОРИЗОВАН' if res.get('auth') else 'ОТСУТСТВУЕТ'}\n"
+                    msg += f"Токен Claude: {'АВТОРИЗОВАН' if res.get('auth') else 'ОТСУТСТВУЕТ'}\n"
                     msg += f"Сокет Claude SOCKS5 (1015): {'ONLINE' if res.get('socks') else 'OFFLINE'}\n"
                     msg += f"Связь с AionUi WebUI: {'ONLINE' if res.get('aion') else 'OFFLINE'}\n"
                     msg += "-"*40 + "\n"
@@ -3581,7 +4126,7 @@ class HerdrConfigApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
     def on_integrations_sync_gemini_click(self):
-        """Диагностика Gemini Farm."""
+        """Диагностика кластера Type-A."""
         if getattr(self, "_integ_task_running", False):
             return
         self._integ_task_running = True
@@ -3601,7 +4146,7 @@ class HerdrConfigApp(tk.Tk):
                 self.on_integrations_status_click()
                 
                 if res.get("success"):
-                    msg = "СВОДНАЯ ТАБЛИЦА GEMINI FARM\n"
+                    msg = "СВОДНАЯ ТАБЛИЦА КЛАСТЕРА GEMINI\n"
                     msg += "-"*40 + "\n"
                     msg += f"Шлюз OmniRoute (20128): {'ONLINE' if res.get('omni_ok') else 'OFFLINE'}\n\n"
                     msg += "ПРОФИЛИ В СИСТЕМЕ HERDR:\n"
@@ -3614,7 +4159,7 @@ class HerdrConfigApp(tk.Tk):
                         msg += "Профили не найдены.\n"
                     msg += "-"*40 + "\n"
                     msg += "ПРИМЕЧАНИЕ:\nАктивная конфигурация маршрутизаторов делегирована ИИ-Агентам (см. SKILLS.md)."
-                    show_toast(self, "Диагностика Gemini Farm", msg)
+                    show_toast(self, "Диагностика Gemini Cluster", msg)
                 else:
                     messagebox.showwarning("Внимание", "Не удалось завершить диагностику. Подробности в логе.")
 
@@ -3799,7 +4344,6 @@ class HerdrConfigApp(tk.Tk):
     # =========================================================================
     def on_global_refresh(self):
         """Кнопка 'Проверить всё'."""
-        token_vault_manager.ensure_locked()
         self.refresh_routes_async()
         if self.active_tab == "proxy":
             self.check_current_proxy_page_async()
@@ -3848,7 +4392,7 @@ class HerdrConfigApp(tk.Tk):
         gemini = res.get("gemini", {})
         claude = res.get("claude", {})
 
-        # 2. Gemini
+        # 2. Worker Node Type-A
         active_port = gemini.get("port", gemini_manager.BASE_SOCKS5_PORT)
         active_route = gemini.get("route", f"socks5h://127.0.0.1:{active_port}")
         self.gemini_route_lbl.config(text=f"{active_route} ({t('pill_socks5')})")
@@ -3923,7 +4467,7 @@ class HerdrConfigApp(tk.Tk):
                 fg=C["red"]
             )
 
-        # 3. Claude
+        # 3. Worker Node Type-B
         self._last_claude_accessible = claude.get("online", False)
         self._apply_claude_route_ui(claude)
 
@@ -3934,7 +4478,7 @@ class HerdrConfigApp(tk.Tk):
             self.quick_status.config(text=t("status_monitoring_ok"), fg=C["yellow"])
 
     def _apply_claude_route_ui(self, claude: dict):
-        """Обновляет элементы интерфейса маршрута Claude Code."""
+        """Обновляет элементы интерфейса маршрута узлов Type-B."""
         c_host = claude.get("host", settings_manager.get_claude_proxy_host())
         c_port = claude.get("port", settings_manager.get_claude_proxy_port())
         c_http_port = claude.get("http_port", 10000 + c_port)
@@ -3949,6 +4493,43 @@ class HerdrConfigApp(tk.Tk):
 
         if hasattr(self, "claude_ks_cb"):
             self.claude_ks_cb.config(fg=C["red"] if ks_enabled else C["subtext"])
+
+        # Обновление кнопки ограничения и бейджа изоляции
+        restr_on = claude.get("restriction_enabled", settings_manager.get_claude_restriction_enabled())
+        if hasattr(self, "claude_restriction_var"):
+            self.claude_restriction_var.set(restr_on)
+        if hasattr(self, "claude_restr_btn"):
+            if restr_on:
+                self.claude_restr_btn.config(
+                    text=t("btn_claude_restriction_on"),
+                    bg=C["green"],
+                    fg="#11111b"
+                )
+            else:
+                self.claude_restr_btn.config(
+                    text=t("btn_claude_restriction_off"),
+                    bg=C["border"],
+                    fg=C["subtext"]
+                )
+
+        try:
+            iso_res = claude_manager.check_claude_isolation()
+            self._update_claude_iso_ui(iso_res)
+        except Exception:
+            pass
+
+        if not restr_on:
+            if hasattr(self, "claude_pill"):
+                self.claude_pill.config(text="DIRECT (БЕЗ 1015)", bg=C["subtext"], fg="#ffffff")
+            self.claude_status_lbl.config(
+                text=claude.get("status_text", "⚪ Прямой доступ (Ограничение на сокет 1015 ВЫКЛ)"),
+                fg=C["fg"]
+            )
+            self.claude_ip_lbl.config(text="Direct • Без сокета 1015", fg=C["fg"])
+            if hasattr(self, "claude_route_lbl"):
+                self.claude_route_lbl.config(text="Прямое подключение (без сокета 1015)")
+            self.claude_ping_lbl.config(text="Direct • Прямой доступ активен", fg=C["green"])
+            return
 
         if claude.get("online"):
             if hasattr(self, "claude_pill"):
@@ -4011,7 +4592,7 @@ class HerdrConfigApp(tk.Tk):
                     if ports_changed:
                         proxy_manager.save_proxies(self.proxies)
 
-                    # 2. Быстрая проверка целевого порта Claude Code
+                    # 2. Быстрая проверка целевого сокета узлов Type-B
                     c_host = settings_manager.get_claude_proxy_host()
                     c_port = settings_manager.get_claude_proxy_port()
                     c_ks = settings_manager.get_claude_killswitch()
@@ -4028,7 +4609,10 @@ class HerdrConfigApp(tk.Tk):
                     self._is_checking_fast_ports = False
 
                 if not self._closing:
-                    self.after(0, self._apply_fast_port_results, claude_res, ports_changed)
+                    try:
+                        self.after(0, self._apply_fast_port_results, claude_res, ports_changed)
+                    except Exception:
+                        pass
 
             threading.Thread(target=worker, daemon=True).start()
 
@@ -4088,8 +4672,14 @@ class HerdrConfigApp(tk.Tk):
             self.state("normal")
             self.lift()
             self.attributes("-topmost", True)
-            self.after_idle(self.attributes, "-topmost", False)
+            self.after(300, lambda: self.attributes("-topmost", False))
             self.focus_force()
+            try:
+                import ctypes
+                hwnd = self.winfo_id()
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -4127,10 +4717,11 @@ _INSTANCE_SOCKET = None
 
 
 def _acquire_instance_lock() -> bool:
-    """Захватывает сокет единственного экземпляра приложения на порту SINGLE_INSTANCE_PORT (38123)."""
+    """Захватывает сокет единственного экземпляра приложения на порту SINGLE_INSTANCE_PORT (38124)."""
     global _INSTANCE_SOCKET
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("127.0.0.1", SINGLE_INSTANCE_PORT))
         s.listen(5)
         _INSTANCE_SOCKET = s
@@ -4165,6 +4756,8 @@ def start_instance_server(app: HerdrConfigApp):
                         data = conn.recv(1024)
                         if b"SHOW" in data:
                             app.after(0, app.bring_to_front)
+                        elif b"EXIT" in data or b"QUIT" in data:
+                            app.after(0, app.destroy)
                     except Exception:
                         pass
             except Exception:
@@ -4174,7 +4767,7 @@ def start_instance_server(app: HerdrConfigApp):
     t.start()
 
 
-def _show_already_running_notice(duration_ms: int = 1200) -> None:
+def _show_already_running_notice(duration_ms: int = 1500) -> None:
     """Отображает окно уведомления о том, что программа уже запущена, на duration_ms миллисекунд и закрывается."""
     try:
         root = tk.Tk()
@@ -4212,16 +4805,26 @@ def _show_already_running_notice(duration_ms: int = 1200) -> None:
 def main():
     print(f"[{time.strftime('%X')}] main() start PID={os.getpid()}", flush=True)
     if not _acquire_instance_lock():
-        print(f"[{time.strftime('%X')}] PID={os.getpid()} _acquire_instance_lock failed! Already running.", flush=True)
+        print(f"[{time.strftime('%X')}] PID={os.getpid()} _acquire_instance_lock failed! Checking existing instance.", flush=True)
+        server_alive = False
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(0.3)
+                s.settimeout(0.5)
                 s.connect(("127.0.0.1", SINGLE_INSTANCE_PORT))
                 s.sendall(b"SHOW\n")
+                server_alive = True
         except Exception:
             pass
-        _show_already_running_notice(1200)
-        return 0
+
+        if server_alive:
+            _show_already_running_notice(1500)
+            return 0
+        else:
+            # Предыдущий сокет освобождается (TIME_WAIT) — ждем полсекунды и пробуем снова
+            time.sleep(0.6)
+            if not _acquire_instance_lock():
+                _show_already_running_notice(1500)
+                return 0
 
     print(f"[{time.strftime('%X')}] PID={os.getpid()} lock acquired, initializing HerdrConfigApp", flush=True)
     try:

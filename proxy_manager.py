@@ -282,18 +282,59 @@ def add_proxy(
 
 
 def delete_proxy(proxy_id: int) -> bool:
-    """Удаляет прокси по ID."""
+    """Удаляет прокси по ID с синхронным удалением из instances.json vless2socks."""
     proxies = load_proxies()
     initial_len = len(proxies)
+    target = next((p for p in proxies if p.get("id") == proxy_id), None)
+    target_port = target.get("port") if target else None
+
     proxies = [p for p in proxies if p.get("id") != proxy_id]
     if len(proxies) < initial_len:
+        for i, p in enumerate(proxies, 1):
+            p["id"] = i
         save_proxies(proxies)
+
+        # Синхронно удаляем инстанс из instances.json проекта vless2socks,
+        # иначе sync_from_vless2socks() немедленно восстановит удалённый порт при следующем обращении
+        if target_port is not None:
+            v_file = find_vless2socks_instances_file()
+            if v_file and v_file.exists():
+                try:
+                    with open(v_file, "r", encoding="utf-8") as f:
+                        v_data = json.load(f)
+                    if isinstance(v_data, list):
+                        new_v_data = []
+                        for inst in v_data:
+                            listen = inst.get("listen", "")
+                            p_str = listen.split(":")[-1].strip() if ":" in listen else listen.strip()
+                            try:
+                                inst_p = int(p_str)
+                            except ValueError:
+                                inst_p = None
+                            if inst_p != target_port:
+                                new_v_data.append(inst)
+                        if len(new_v_data) < len(v_data):
+                            with open(v_file, "w", encoding="utf-8") as f:
+                                json.dump(new_v_data, f, indent=2, ensure_ascii=False)
+                except Exception:
+                    pass
+
+        # Очищаем привязки Gemini к удаленному порту, если они были
+        try:
+            import settings_manager
+            bindings = settings_manager.get_all_account_proxy_bindings()
+            for prof_name, b_info in list(bindings.items()):
+                if isinstance(b_info, dict) and b_info.get("port") == target_port:
+                    settings_manager.clear_account_proxy_binding(prof_name)
+        except Exception:
+            pass
+
         return True
     return False
 
 
 def set_proxy_claude_flag(port: int, enabled: bool) -> bool:
-    """Устанавливает или снимает флаг Claude для прокси по указанному порту."""
+    """Устанавливает или снимает флаг привязки узлов Type-B для прокси по указанному порту."""
     proxies = load_proxies()
     found = False
     for p in proxies:
@@ -308,7 +349,7 @@ def set_proxy_claude_flag(port: int, enabled: bool) -> bool:
 
 
 def get_proxy_claude_flag(port: int) -> bool:
-    """Возвращает статус флага Claude для прокси (для 1015 по умолчанию True, для остальных False)."""
+    """Возвращает статус флага узлов Type-B для прокси (для 1015 по умолчанию True, для остальных False)."""
     proxies = load_proxies()
     for p in proxies:
         if p.get("port") == port:

@@ -39,7 +39,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "claude_proxy_host": "127.0.0.1", # Хост прокси для Claude Code
     "claude_proxy_port": 1015,        # Порт прокси для Claude Code (по умолчанию 1015 System Proxy)
     "claude_killswitch": True,        # Killswitch для Claude (по умолчанию включен)
-    "claude_node_isolate": True,      # Изоляция Node.js/claude.exe в брандмауэре (Windows)
+    "claude_node_isolate": False,     # Изоляция Node.js/claude.exe в брандмауэре (по умолчанию выключена, Node.js без ограничений)
+    "claude_restriction_enabled": True, # Мастер-переключатель ограничения на сокет 1015
     "port_check_interval_seconds": 2.0, # Интервал быстрой проверки доступности портов и Killswitch (сек)
 }
 
@@ -138,12 +139,12 @@ def clear_all_account_proxy_bindings() -> None:
 
 
 def get_claude_proxy_host() -> str:
-    """Возвращает настроенный хост прокси для Claude Code."""
+    """Возвращает настроенный хост сокета для узлов Type-B."""
     return str(get_setting("claude_proxy_host", DEFAULT_SETTINGS["claude_proxy_host"])).strip() or "127.0.0.1"
 
 
 def get_claude_proxy_port() -> int:
-    """Возвращает настроенный порт прокси для Claude Code."""
+    """Возвращает настроенный порт сокета для узлов Type-B."""
     val = get_setting("claude_proxy_port", DEFAULT_SETTINGS["claude_proxy_port"])
     try:
         return int(val)
@@ -152,7 +153,7 @@ def get_claude_proxy_port() -> int:
 
 
 def get_claude_killswitch() -> bool:
-    """Возвращает статус флага Killswitch для Claude Code (по умолчанию True)."""
+    """Возвращает статус флага Killswitch для узлов Type-B (по умолчанию True)."""
     return bool(get_setting("claude_killswitch", DEFAULT_SETTINGS["claude_killswitch"]))
 
 
@@ -161,8 +162,24 @@ def get_claude_node_isolate() -> bool:
     return bool(get_setting("claude_node_isolate", DEFAULT_SETTINGS["claude_node_isolate"]))
 
 
-def set_claude_proxy_settings(host: str, port: int, killswitch: bool, node_isolate: bool = False) -> None:
-    """Сохраняет настройки прокси и Killswitch для Claude Code в settings.json."""
+def get_claude_restriction_enabled() -> bool:
+    """Возвращает статус мастер-ограничения узлов Type-B на сокет 1015 (по умолчанию True)."""
+    return bool(get_setting("claude_restriction_enabled", DEFAULT_SETTINGS["claude_restriction_enabled"]))
+
+
+def set_claude_restriction_enabled(enabled: bool) -> None:
+    """Устанавливает мастер-ограничение узлов Type-B на сокет 1015."""
+    set_setting("claude_restriction_enabled", bool(enabled))
+
+
+def set_claude_proxy_settings(
+    host: str,
+    port: int,
+    killswitch: bool,
+    node_isolate: bool = False,
+    restriction_enabled: bool | None = None,
+) -> None:
+    """Сохраняет настройки сокета и Killswitch для узлов Type-B в settings.json."""
     s = load_settings()
     s["claude_proxy_host"] = str(host).strip() or "127.0.0.1"
     try:
@@ -170,7 +187,9 @@ def set_claude_proxy_settings(host: str, port: int, killswitch: bool, node_isola
     except (ValueError, TypeError):
         s["claude_proxy_port"] = 1015
     s["claude_killswitch"] = bool(killswitch)
-    s["claude_node_isolate"] = bool(node_isolate)
+    s["claude_node_isolate"] = False
+    if restriction_enabled is not None:
+        s["claude_restriction_enabled"] = bool(restriction_enabled)
     save_settings(s)
 
 
