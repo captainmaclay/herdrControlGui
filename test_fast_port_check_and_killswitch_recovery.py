@@ -38,11 +38,13 @@ class TestFastPortCheckAndKillswitchRecovery(unittest.TestCase):
         settings_manager.set_setting("port_check_interval_seconds", 60.0)  # Выше максимума 30.0
         self.assertEqual(settings_manager.get_port_check_interval(), 30.0)
 
+    @patch("node_isolate_manager.apply_wsl_isolation")
     @patch("claude_manager.get_claude_settings_files")
     @patch("claude_manager.check_port_accessible")
-    def test_probe_claude_route_fast_mode_speed_and_recovery(self, mock_access, mock_files):
+    def test_probe_claude_route_fast_mode_speed_and_recovery(self, mock_access, mock_files, mock_iso):
         """Режим fast=True отрабатывает моментально (< 20мс) и снимает Killswitch при открытии порта."""
         mock_files.return_value = []
+        mock_iso.return_value = True
 
         # 1. Порт закрыт -> Killswitch активен
         mock_access.return_value = False

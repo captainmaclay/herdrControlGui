@@ -79,7 +79,7 @@ class TestAppUI(unittest.TestCase):
 
         with patch("config_app.claude_manager.save_claude_config") as mock_save:
             self.app._save_claude_settings_action()
-            mock_save.assert_called_once_with("127.0.0.1", 1099, True)
+            mock_save.assert_called_once_with("127.0.0.1", 1099, True, restriction_enabled=True)
 
     def test_claude_combo_select(self):
         """Проверяет выбор прокси из выпадающего списка."""

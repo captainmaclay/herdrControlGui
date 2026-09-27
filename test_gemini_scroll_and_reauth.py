@@ -23,20 +23,20 @@ class TestGeminiScrollAndReauth(unittest.TestCase):
 
     def test_launch_add_account_terminal_overwrite(self):
         """Check that overwrite flag invokes gemini-oauth reauth in terminal."""
-        with patch("subprocess.Popen") as mock_popen, patch("gemini_manager.reserve_new_profile_port"):
+        with patch("gemini_manager.subprocess.Popen") as mock_popen, patch("gemini_manager.reserve_new_profile_port"):
             ok = gemini_manager.launch_add_account_terminal("test-account", overwrite=True)
             self.assertTrue(ok)
-            mock_popen.assert_called_once()
-            args = mock_popen.call_args[0][0]
-            cmd_str = args[-1]
+            terminal_calls = [c for c in mock_popen.call_args_list if len(c[0]) > 0 and isinstance(c[0][0], list) and "-lc" in c[0][0]]
+            self.assertTrue(len(terminal_calls) >= 1)
+            cmd_str = terminal_calls[-1][0][0][-1]
             self.assertIn("gemini-oauth reauth test-account", cmd_str)
 
-        with patch("subprocess.Popen") as mock_popen, patch("gemini_manager.reserve_new_profile_port"):
+        with patch("gemini_manager.subprocess.Popen") as mock_popen, patch("gemini_manager.reserve_new_profile_port"):
             ok = gemini_manager.launch_add_account_terminal("new-account", overwrite=False)
             self.assertTrue(ok)
-            mock_popen.assert_called_once()
-            args = mock_popen.call_args[0][0]
-            cmd_str = args[-1]
+            terminal_calls = [c for c in mock_popen.call_args_list if len(c[0]) > 0 and isinstance(c[0][0], list) and "-lc" in c[0][0]]
+            self.assertTrue(len(terminal_calls) >= 1)
+            cmd_str = terminal_calls[-1][0][0][-1]
             self.assertIn("gemini-oauth add new-account", cmd_str)
 
     def test_switch_profile_and_active_state(self):

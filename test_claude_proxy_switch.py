@@ -285,6 +285,90 @@ class TestClaudeProxySwitching(unittest.TestCase):
             except Exception:
                 pass
 
+    def test_restriction_toggle_warning_cancel_leaves_restriction_on(self):
+        """Проверяет, что при отмене подтверждения в диалоговом окне предупреждения
+        изоляция остается включенной."""
+        import tkinter as tk
+        import config_app
+
+        try:
+            root = tk.Tk()
+            root.withdraw()
+        except Exception:
+            self.skipTest("Tkinter GUI display not available")
+
+        try:
+            class MockApp:
+                pass
+
+            app = MockApp()
+            app.claude_restriction_var = tk.BooleanVar(value=True)
+            app._save_claude_settings_action = MagicMock()
+            app._update_claude_iso_ui = MagicMock()
+
+            with patch("config_app.messagebox.askyesno", return_value=False) as mock_ask:
+                with patch("claude_manager.set_claude_restriction") as mock_set:
+                    config_app.HerdrConfigApp._on_toggle_claude_restriction(app)
+                    mock_ask.assert_called_once()
+                    self.assertTrue(app.claude_restriction_var.get())
+                    mock_set.assert_not_called()
+        finally:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+    def test_restriction_toggle_warning_confirm_disables_restriction(self):
+        """Проверяет, что при подтверждении диалога предупреждения изоляция отключается."""
+        import tkinter as tk
+        import config_app
+
+        try:
+            root = tk.Tk()
+            root.withdraw()
+        except Exception:
+            self.skipTest("Tkinter GUI display not available")
+
+        try:
+            class MockApp:
+                pass
+
+            app = MockApp()
+            app.claude_restriction_var = tk.BooleanVar(value=True)
+            app._save_claude_settings_action = MagicMock()
+            app._update_claude_iso_ui = MagicMock()
+
+            with patch("config_app.messagebox.askyesno", return_value=True) as mock_ask:
+                with patch("claude_manager.set_claude_restriction") as mock_set:
+                    mock_set.return_value = {"status": "direct", "badge": "⚪ ВЫКЛ"}
+                    config_app.HerdrConfigApp._on_toggle_claude_restriction(app)
+                    mock_ask.assert_called_once()
+                    self.assertFalse(app.claude_restriction_var.get())
+                    mock_set.assert_called_once_with(False)
+        finally:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+    @patch("node_isolate_manager.check_wsl_isolation_active")
+    @patch("claude_manager.check_port_accessible")
+    def test_kernel_isolated_resyncs_restriction_to_true(self, mock_port, mock_wsl_iso):
+        """Проверяет, что при активной изоляции ядра WSL (например, после перезапуска WSL),
+        check_claude_isolation автоматически возвращает ограничение в True."""
+        mock_port.return_value = True
+        mock_wsl_iso.return_value = True
+
+        # Устанавливаем ограничение в False
+        settings_manager.set_claude_restriction_enabled(False)
+        self.assertFalse(settings_manager.get_claude_restriction_enabled())
+
+        # Вызываем проверку изоляции: так как ядро активно изолировано, Herdr должен синхронизироваться
+        res = claude_manager.check_claude_isolation()
+        self.assertTrue(res["restriction_enabled"])
+        self.assertTrue(settings_manager.get_claude_restriction_enabled())
+
+
 
 if __name__ == "__main__":
     unittest.main()

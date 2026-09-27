@@ -221,6 +221,145 @@ def _safe_write_file(dest_p: Path, content: bytes) -> bool:
         return False
 
 
+# ── Согласованный снимок базы SQLite (вместо копирования живого файла) ───────────
+# Раньше бэкап клал в архив aionui-backend.db как обычный файл через \\wsl$, пока AionUi в него
+# писал: без журнала -wal (свежие изменения живут там) и с риском прочитать файл «на середине записи».
+# Такая копия могла оказаться несогласованной и при восстановлении ломала базу.
+# Теперь снимок делает SQLite Online Backup API (читает и основной файл, и -wal, согласованно),
+# снимок проверяется PRAGMA integrity_check, результат пишется в манифест; битый снимок в архив не попадает.
+AIONUI_SNAPSHOT_NAME = ".herdr_snapshot.db"
+AIONUI_LINUX_DIR: str | None = None   # None → ~/.aionui-web внутри WSL (тесты подменяют на временную папку)
+SNAPSHOT_COUNT_TABLES = ("conversations", "messages")
+
+_SNAPSHOT_CODE = r"""
+import json, sqlite3, sys, time
+from pathlib import Path
+src = Path(sys.argv[1]).expanduser(); dst = Path(sys.argv[2]).expanduser()
+info = {"method": "sqlite_backup_api", "source": str(src)}
+try:
+    if not src.exists():
+        raise FileNotFoundError(f"нет файла {src}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        dst.unlink()
+    try:
+        s = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=30)
+        s.execute("select count(*) from sqlite_master").fetchone()
+    except sqlite3.OperationalError:
+        s = sqlite3.connect(str(src), timeout=30)
+    d = sqlite3.connect(str(dst))
+    t0 = time.time()
+    s.backup(d, pages=256, sleep=0.02)
+    d.close(); s.close()
+    c = sqlite3.connect(str(dst))
+    res = [r[0] for r in c.execute("PRAGMA integrity_check").fetchall()]
+    info["integrity"] = "ok" if res == ["ok"] else "; ".join(map(str, res[:5]))
+    counts = {}
+    for t in TABLES:
+        try:
+            counts[t] = c.execute(f'select count(*) from "{t}"').fetchone()[0]
+        except sqlite3.DatabaseError:
+            pass
+    info["counts"] = counts
+    c.execute("PRAGMA journal_mode=DELETE")
+    c.close()
+    info["size_bytes"] = dst.stat().st_size
+    info["elapsed_ms"] = int((time.time() - t0) * 1000)
+except Exception as e:
+    info["integrity"] = "error"
+    info["error"] = f"{type(e).__name__}: {e}"
+print(json.dumps(info, ensure_ascii=False))
+sys.exit(0 if info.get("integrity") == "ok" else 2)
+""".replace("TABLES", repr(SNAPSHOT_COUNT_TABLES))
+
+
+def _parse_json_tail(out: str) -> dict[str, Any]:
+    for line in reversed((out or "").strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+    return {"integrity": "error", "error": (out or "").strip()[-300:] or "нет вывода"}
+
+
+def snapshot_aionui_db(timeout: float = 300.0) -> tuple[bytes | None, dict[str, Any]]:
+    """Согласованный снимок ~/.aionui-web/aionui-backend.db (внутри WSL, Online Backup API).
+
+    Возвращает (байты снимка или None, информация для манифеста). AionUi останавливать не нужно.
+    """
+    lin_dir = AIONUI_LINUX_DIR or "~/.aionui-web"
+    src = f"{lin_dir}/aionui-backend.db"
+    dst = f"{lin_dir}/db_backups/{AIONUI_SNAPSHOT_NAME}"
+    ok, out = _wsl_python(_SNAPSHOT_CODE, timeout=timeout, args=[src, dst])
+    info = _parse_json_tail(out)
+    snap = WSL_AIONUI_DIR / "db_backups" / AIONUI_SNAPSHOT_NAME
+    try:
+        if ok and info.get("integrity") == "ok" and snap.exists():
+            return snap.read_bytes(), info
+        if ok and info.get("integrity") == "ok":
+            info = {**info, "integrity": "error", "error": f"снимок не найден: {snap}"}
+        return None, info
+    finally:
+        try:
+            snap.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def snapshot_local_sqlite(src: Path) -> tuple[bytes | None, dict[str, Any]]:
+    """То же для локального файла (AionUi под Windows): снимок в этом же процессе."""
+    import sqlite3
+    import tempfile
+    info: dict[str, Any] = {"method": "sqlite_backup_api", "source": str(src)}
+    tmp = Path(tempfile.mkdtemp()) / "snap.db"
+    try:
+        s = sqlite3.connect(str(src), timeout=30)
+        d = sqlite3.connect(str(tmp))
+        s.backup(d, pages=256, sleep=0.02)
+        d.close()
+        s.close()
+        ok, vinfo = validate_sqlite_bytes(tmp.read_bytes())
+        info.update(vinfo)
+        return (tmp.read_bytes() if ok else None), info
+    except Exception as e:
+        info.update({"integrity": "error", "error": f"{type(e).__name__}: {e}"})
+        return None, info
+    finally:
+        shutil.rmtree(tmp.parent, ignore_errors=True)
+
+
+def validate_sqlite_bytes(content: bytes) -> tuple[bool, dict[str, Any]]:
+    """Проверяет базу SQLite из архива до восстановления: integrity_check и число записей."""
+    import sqlite3
+    import tempfile
+    tmpdir = Path(tempfile.mkdtemp())
+    p = tmpdir / "check.db"
+    info: dict[str, Any] = {}
+    try:
+        p.write_bytes(content)
+        c = sqlite3.connect(str(p))
+        try:
+            res = [r[0] for r in c.execute("PRAGMA integrity_check").fetchall()]
+            info["integrity"] = "ok" if res == ["ok"] else "; ".join(map(str, res[:5]))
+            counts = {}
+            for t in SNAPSHOT_COUNT_TABLES:
+                try:
+                    counts[t] = c.execute(f'select count(*) from "{t}"').fetchone()[0]
+                except sqlite3.DatabaseError:
+                    pass
+            info["counts"] = counts
+        finally:
+            c.close()
+    except Exception as e:
+        info["integrity"] = "error"
+        info["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    return info.get("integrity") == "ok", info
+
+
 def create_encrypted_backup(
     password: str,
     target_dir: str | Path | None = None,
@@ -297,8 +436,14 @@ def create_encrypted_backup(
                             files_packed += 1
 
         # 1.4 Файлы AionUi (WSL2: SQLite база данных, настройки расширений, манифест)
+        aionui_db_info: dict[str, Any] = {"integrity": "skipped", "error": "папка AionUi в WSL не найдена"}
         if WSL_AIONUI_DIR.exists():
-            for fn in ["aionui-backend.db", "extension-states.json", "extension-user-states.json"]:
+            # База — только согласованным снимком SQLite (никогда не копией живого файла)
+            snap_bytes, aionui_db_info = snapshot_aionui_db()
+            if snap_bytes is not None:
+                zf.writestr("aionui/wsl/aionui-backend.db", snap_bytes)
+                files_packed += 1
+            for fn in ["extension-states.json", "extension-user-states.json"]:
                 fp = WSL_AIONUI_DIR / fn
                 if fp.exists():
                     try:
@@ -315,8 +460,15 @@ def create_encrypted_backup(
                     pass
 
         # 1.5 Файлы AionUi (Windows)
+        aionui_win_db_info: dict[str, Any] | None = None
         if WIN_AIONUI_DIR.exists():
-            for fn in ["aionui-backend.db", "extension-states.json", "extension-user-states.json"]:
+            win_db = WIN_AIONUI_DIR / "aionui-backend.db"
+            if win_db.exists():
+                wb, aionui_win_db_info = snapshot_local_sqlite(win_db)
+                if wb is not None:
+                    zf.writestr("aionui/win/aionui-backend.db", wb)
+                    files_packed += 1
+            for fn in ["extension-states.json", "extension-user-states.json"]:
                 fp = WIN_AIONUI_DIR / fn
                 if fp.exists():
                     try:
@@ -356,6 +508,8 @@ def create_encrypted_backup(
             "includes_claude": True,
             "includes_claude_oauth_profiles": True,
             "includes_aionui": True,
+            "aionui_db": aionui_db_info,
+            "aionui_win_db": aionui_win_db_info,
         }
         zf.writestr("manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False))
 
@@ -384,19 +538,82 @@ def create_encrypted_backup(
 
         update_backup_config("last_backup_time", time.strftime("%Y-%m-%d %H:%M:%S"))
         msg = f"Бэкап успешно создан ({files_packed} файлов, {len(ciphertext) // 1024 + 1} КБ): {out_filename}"
+        if aionui_db_info.get("integrity") == "ok":
+            c = aionui_db_info.get("counts", {})
+            msg += (f"\nБаза AionUi: согласованный снимок, integrity_check = ok "
+                    f"(чатов: {c.get('conversations', '?')}, сообщений: {c.get('messages', '?')}).")
+        elif aionui_db_info.get("integrity") != "skipped":
+            msg += (f"\n⚠ База AionUi НЕ включена в бэкап: снимок не прошёл проверку "
+                    f"({aionui_db_info.get('error') or aionui_db_info.get('integrity')}). "
+                    f"Похоже, база повреждена — см. aionUi_helper/docs/REPAIR_AIONUI_DB.md.")
         return True, msg, str(out_path)
     except Exception as e:
         return False, f"Ошибка записи файла бэкапа: {e}", None
 
 
+# ── Безопасная работа с живой базой AionUi ─────────────────────────────────────
+# Раньше восстановление .hbak перезаписывало ~/.aionui-web/aionui-backend.db через \\wsl$
+# прямо под работающим AionUi и оставляло старые -wal/-shm. Новый файл базы + чужой журнал WAL
+# = «database disk image is malformed»; при следующем запуске aioncore отказывается открыть базу
+# (BOOTSTRAP_DATABASE_CORRUPTION_REQUIRES_USER_CONFIRMATION) и уходит в цикл перезапусков.
+# Инцидент 27.09.2026 00:53–08:58 МСК. Теперь: флаг обслуживания → остановка с проверкой →
+# запись базы → удаление старых -wal/-shm → снятие флага (сторож поднимет AionUi сам).
+AIONUI_HELPER_SCRIPTS = "/mnt/d/My files/aionUi_helper/scripts"
+AIONUI_DB_MEMBER = "aionui/wsl/aionui-backend.db"
+
+
+def _wsl_python(code: str, timeout: float = 60.0, args: list[str] | None = None) -> tuple[bool, str]:
+    """Выполняет python3-код внутри WSL (на Windows) или локально."""
+    cmd = ["python3", "-c", code, *(args or [])]
+    if os.name == "nt":
+        cmd = ["wsl.exe", "-d", WSL_DISTRO, "--"] + cmd
+    try:
+        kw: dict[str, Any] = {"capture_output": True, "text": True, "timeout": timeout,
+                              "encoding": "utf-8", "errors": "replace"}
+        if os.name == "nt":
+            kw["creationflags"] = 0x08000000
+        r = subprocess.run(cmd, **kw)
+        return r.returncode == 0, (r.stdout or "") + (r.stderr or "")
+    except Exception as e:
+        return False, str(e)
+
+
+def aionui_stop_for_maintenance(reason: str = "herdr-restore") -> tuple[bool, str]:
+    """Ставит ~/.aionui-web/.maintenance и останавливает AionUi (aionui_maint.stop_aionui)."""
+    code = (
+        "import sys; sys.path.insert(0, %r); import aionui_maint as m; "
+        "f = m.maint_flag(); f.parent.mkdir(parents=True, exist_ok=True); f.write_text(%r); "
+        "sys.exit(0 if m.stop_aionui() else 3)"
+    ) % (AIONUI_HELPER_SCRIPTS, reason)
+    return _wsl_python(code, timeout=90.0)
+
+
+def aionui_end_maintenance() -> tuple[bool, str]:
+    """Снимает флаг обслуживания; встроенный aiWatcher сам запустит AionUi с чистым окружением."""
+    code = ("import sys; sys.path.insert(0, %r); import aionui_maint as m; "
+            "m.maint_flag().unlink(missing_ok=True)") % AIONUI_HELPER_SCRIPTS
+    return _wsl_python(code, timeout=30.0)
+
+
 def restore_encrypted_backup(
     backup_file_path: str | Path,
     password: str,
+    restore_herdr_config: bool = True,
+    restore_oauth_profiles: bool = True,
+    restore_aionui_db: bool = True,
 ) -> tuple[bool, str, dict[str, Any] | None]:
-    """Расшифровывает и восстанавливает всё окружение из файла .hbak.
+    """Расшифровывает и восстанавливает окружение из файла .hbak с поддержкой выборочного восстановления.
+    
+    Параметры:
+      restore_herdr_config: восстанавливать настройки Herdr Center (win/*)
+      restore_oauth_profiles: восстанавливать профили и токены Gemini и Claude (wsl/*, claude/*)
+      restore_aionui_db: восстанавливать базу данных и состояние AionUi (aionui/*)
     
     Возвращает (success, message, manifest)
     """
+    if not (restore_herdr_config or restore_oauth_profiles or restore_aionui_db):
+        return False, "Не выбран ни один компонент для восстановления.", None
+
     if not password:
         return False, "Сначала введите пароль для расшифровки бэкапа!", None
 
@@ -430,6 +647,7 @@ def restore_encrypted_backup(
         restored_count = 0
         manifest = {}
 
+        aionui_note = ""
         with zipfile.ZipFile(zip_buf, "r") as zf:
             namelist = zf.namelist()
             if "manifest.json" in namelist:
@@ -438,62 +656,111 @@ def restore_encrypted_backup(
                 except Exception:
                     pass
 
+            # База AionUi восстанавливается только при остановленном AionUi (если запрошено восстановление базы)
+            skip_aionui_db = not restore_aionui_db
+            aionui_stopped = False
+            if restore_aionui_db and AIONUI_DB_MEMBER in namelist:
+                db_ok, db_info = validate_sqlite_bytes(zf.read(AIONUI_DB_MEMBER))
+                if not db_ok:
+                    skip_aionui_db = True
+                    aionui_note = (" База AionUi из архива НЕ восстановлена: копия повреждена "
+                                   f"({db_info.get('error') or db_info.get('integrity')}). Текущая база не тронута.")
+            if restore_aionui_db and AIONUI_DB_MEMBER in namelist and not skip_aionui_db:
+                aionui_stopped, out = aionui_stop_for_maintenance()
+                if not aionui_stopped:
+                    skip_aionui_db = True
+                    aionui_note = (" База AionUi НЕ восстановлена: не удалось безопасно остановить AionUi "
+                                   "(выключите aiWatcher и повторите).")
+                    aionui_end_maintenance()
+
             for name in namelist:
                 if name == "manifest.json":
+                    continue
+                if name == AIONUI_DB_MEMBER and skip_aionui_db:
                     continue
 
                 content = zf.read(name)
 
                 if name.startswith("win/"):
+                    if not restore_herdr_config:
+                        continue
                     rel_name = name[4:]
                     dest_p = BASE_DIR / rel_name
                     if _safe_write_file(dest_p, content):
                         restored_count += 1
 
                 elif name.startswith("wsl/"):
+                    if not restore_oauth_profiles:
+                        continue
                     rel_name = name[4:]
                     dest_p = WSL_GEMINI_DIR / rel_name
                     if _safe_write_file(dest_p, content):
                         restored_count += 1
 
                 elif name.startswith("claude/win/"):
+                    if not restore_oauth_profiles:
+                        continue
                     rel_name = name[len("claude/win/"):]
                     dest_p = WIN_CLAUDE_DIR / rel_name
                     if _safe_write_file(dest_p, content):
                         restored_count += 1
 
                 elif name.startswith("claude/wsl/"):
+                    if not restore_oauth_profiles:
+                        continue
                     rel_name = name[len("claude/wsl/"):]
                     dest_p = WSL_CLAUDE_DIR / rel_name
                     if _safe_write_file(dest_p, content):
                         restored_count += 1
 
                 elif name.startswith("aionui/wsl/"):
+                    if not restore_aionui_db:
+                        continue
                     rel_name = name[len("aionui/wsl/"):]
                     dest_p = WSL_AIONUI_DIR / rel_name
+                    if name == AIONUI_DB_MEMBER:
+                        # старый журнал WAL от другой базы нельзя оставлять рядом с новым файлом
+                        for sfx in ("-wal", "-shm"):
+                            try:
+                                (WSL_AIONUI_DIR / f"aionui-backend.db{sfx}").unlink(missing_ok=True)
+                            except OSError:
+                                pass
                     if _safe_write_file(dest_p, content):
                         restored_count += 1
 
                 elif name.startswith("aionui/win/"):
+                    if not restore_aionui_db:
+                        continue
                     rel_name = name[len("aionui/win/"):]
                     dest_p = WIN_AIONUI_DIR / rel_name
+                    if rel_name == "aionui-backend.db" and not validate_sqlite_bytes(content)[0]:
+                        aionui_note += " База AionUi (Windows) из архива повреждена и НЕ восстановлена."
+                        continue
                     if _safe_write_file(dest_p, content):
                         restored_count += 1
 
+        if aionui_stopped:
+            aionui_end_maintenance()
+            aionui_note = "\n• AionUi был остановлен на время восстановления базы и будет запущен aiWatcher."
+        elif not restore_aionui_db:
+            aionui_note = "\n• База данных и чаты AionUi: не затрагивались (пропущено пользователем)."
+
         # Отказоустойчивая валидация и миграция истории стратегий после импорта
-        try:
-            import strategy_manager
-            repaired_history = strategy_manager.load_history()
-            strategy_manager.save_history(repaired_history)
-        except Exception:
-            pass
+        if restore_herdr_config:
+            try:
+                import strategy_manager
+                repaired_history = strategy_manager.load_history()
+                strategy_manager.save_history(repaired_history)
+            except Exception:
+                pass
 
         # Синхронизация восстановленных настроек узлов Type-B и Killswitch
-        try:
-            import claude_manager
-            claude_manager.sync_after_restore()
-        except Exception:
-            pass
+        if restore_herdr_config or restore_oauth_profiles:
+            try:
+                import claude_manager
+                claude_manager.sync_after_restore()
+            except Exception:
+                pass
 
         # Уведомление в integrations.log о восстановлении
         try:
@@ -503,18 +770,20 @@ def restore_encrypted_backup(
             pass
 
         # Восстановление параметров автобэкапа из манифеста
-        try:
-            if "auto_backup_enabled" in manifest:
-                update_backup_config("auto_backup_enabled", bool(manifest["auto_backup_enabled"]))
-            if "backup_interval_hours" in manifest:
-                update_backup_config("backup_interval_hours", int(manifest["backup_interval_hours"]))
-        except Exception:
-            pass
+        if restore_herdr_config:
+            try:
+                if "auto_backup_enabled" in manifest:
+                    update_backup_config("auto_backup_enabled", bool(manifest["auto_backup_enabled"]))
+                if "backup_interval_hours" in manifest:
+                    update_backup_config("backup_interval_hours", int(manifest["backup_interval_hours"]))
+            except Exception:
+                pass
 
         msg = (
             f"✓ Бэкап успешно восстановлен!\n"
             f"Восстановлено файлов: {restored_count}\n"
             f"Дата создания бэкапа: {manifest.get('created_at', 'Неизвестно')}"
+            f"{aionui_note}"
         )
         return True, msg, manifest
 

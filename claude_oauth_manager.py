@@ -447,12 +447,12 @@ def build_login_bash_command(profile_name: str, proxy: dict[str, Any] | None = N
     )
 
 
-def launch_login_terminal(profile_name: str) -> tuple[bool, str]:
-    """Открывает терминал WSL для аутентификации нового профиля Type-B через выделенный сокет."""
+def launch_login_terminal(profile_name: str, overwrite: bool = False) -> tuple[bool, str]:
+    """Открывает терминал WSL для аутентификации или перезаписи профиля Type-B через выделенный сокет."""
     profile_name = (profile_name or "").strip()
     if not is_valid_profile_name(profile_name):
         return False, f"Некорректное имя профиля: '{profile_name}'. Допустимы латиница, цифры и символы @._+-"
-    if (PROFILES_DIR / profile_name / CREDENTIALS_NAME).exists():
+    if not overwrite and (PROFILES_DIR / profile_name / CREDENTIALS_NAME).exists():
         return False, f"Профиль '{profile_name}' уже существует."
 
     px = get_claude_oauth_proxy()
@@ -464,12 +464,17 @@ def launch_login_terminal(profile_name: str) -> tuple[bool, str]:
 
     try:
         (PROFILES_DIR / profile_name).mkdir(parents=True, exist_ok=True)
-        _write_json(PROFILES_DIR / profile_name / PROFILE_META_NAME, {
+        meta_file = PROFILES_DIR / profile_name / PROFILE_META_NAME
+        meta = _read_json(meta_file) if meta_file.exists() else {}
+        meta.update({
             "profile_name": profile_name,
-            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "source": "login",
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "source": "reauth" if overwrite else "login",
             "proxy_port": px["port"],
         })
+        if "created_at" not in meta:
+            meta["created_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        _write_json(meta_file, meta)
     except Exception:
         pass
 
@@ -479,21 +484,72 @@ def launch_login_terminal(profile_name: str) -> tuple[bool, str]:
             ["wsl.exe", "-d", WSL_DISTRO, "-u", WSL_USER, "bash", "-lc", bash_cmd],
             creationflags=subprocess.CREATE_NEW_CONSOLE if hasattr(subprocess, "CREATE_NEW_CONSOLE") else 16,
         )
-        return True, f"Терминал входа открыт. Сокет: {px['host']}:{px['port']} (HTTP :{px['http_port']})"
+        action_name = "перезаписи" if overwrite else "входа"
+        return True, f"Терминал {action_name} открыт. Сокет: {px['host']}:{px['port']} (HTTP :{px['http_port']})"
     except Exception as e:
         return False, f"Не удалось запустить терминал WSL: {e}"
 
 
-def validate_profile_token(profile_name: str) -> dict[str, Any]:
-    """Проверяет access-токен профиля запросом к целевому API через выделенный сокет."""
+def check_token_live(profile_name: str, timeout: float = 2.5) -> dict[str, Any]:
+    """Проверяет работоспособность токена профиля Claude (срок действия, структуру и запрос к API через сокет)."""
     cred_file = PROFILES_DIR / profile_name / CREDENTIALS_NAME
-    oauth = _read_json(cred_file).get("claudeAiOauth") or {}
-    token = oauth.get("accessToken")
     px = get_claude_oauth_proxy()
+    port = px["port"]
+    if not cred_file.exists():
+        return {
+            "valid": False,
+            "profile_name": profile_name,
+            "email": profile_name,
+            "name": "-",
+            "port": port,
+            "status_text": "Токен отсутствует",
+            "error": "Файл учетных данных не найден",
+        }
+
+    info = get_credentials_info(cred_file)
+    acc = _profile_account(PROFILES_DIR / profile_name)
+    email = acc.get("emailAddress") or info.get("email") or profile_name
+    name = acc.get("displayName") or acc.get("fullName") or "-"
+    expiry_text = info.get("expiry_text", "-")
+
+    token = info.get("access_token")
     if not token:
-        return {"success": False, "error": "В профиле нет токена"}
-    if not is_claude_proxy_online():
-        return {"success": False, "error": f"Выделенный сокет :{px['port']} недоступен (проверка заблокирована)"}
+        return {
+            "valid": False,
+            "profile_name": profile_name,
+            "email": email,
+            "name": name,
+            "port": port,
+            "expiry_text": expiry_text,
+            "status_text": "Токен не работает",
+            "error": "В профиле отсутствует access_token",
+        }
+
+    if info.get("is_expired"):
+        if not info.get("refresh_token") or info.get("refresh_is_expired"):
+            return {
+                "valid": False,
+                "profile_name": profile_name,
+                "email": email,
+                "name": name,
+                "port": port,
+                "expiry_text": expiry_text,
+                "status_text": "Токен не работает",
+                "error": "Токен и refresh-токен просрочены",
+            }
+
+    if not is_claude_proxy_online(timeout=min(timeout, 1.0)):
+        return {
+            "valid": False,
+            "profile_name": profile_name,
+            "email": email,
+            "name": name,
+            "port": port,
+            "expiry_text": expiry_text,
+            "online_verified": False,
+            "status_text": "Токен не работает",
+            "error": f"Выделенный сокет :{port} недоступен (проверка заблокирована)",
+        }
 
     try:
         resp = requests.get(
@@ -504,18 +560,92 @@ def validate_profile_token(profile_name: str) -> dict[str, Any]:
                 "User-Agent": "HerdrTelemetryOAuth/1.0",
             },
             proxies={"http": px["http_url"], "https": px["http_url"]},
-            timeout=10,
+            timeout=timeout,
         )
+        if resp.status_code == 200:
+            try:
+                data = resp.json()
+            except Exception:
+                data = {}
+            account = data.get("account") if isinstance(data.get("account"), dict) else {}
+            api_email = account.get("email") or account.get("email_address")
+            if api_email:
+                email = api_email
+            return {
+                "valid": True,
+                "profile_name": profile_name,
+                "email": email,
+                "name": name,
+                "port": port,
+                "expiry_text": expiry_text,
+                "online_verified": True,
+                "status_text": "Токен работает",
+                "error": None,
+            }
+        elif resp.status_code == 401:
+            return {
+                "valid": False,
+                "profile_name": profile_name,
+                "email": email,
+                "name": name,
+                "port": port,
+                "expiry_text": expiry_text,
+                "status_text": "Токен не работает",
+                "error": "Токен недействителен (401). Требуется повторная авторизация.",
+            }
+        else:
+            return {
+                "valid": False,
+                "profile_name": profile_name,
+                "email": email,
+                "name": name,
+                "port": port,
+                "expiry_text": expiry_text,
+                "status_text": "Ошибка API",
+                "error": f"Ответ API: HTTP {resp.status_code}",
+            }
     except Exception as e:
-        return {"success": False, "error": f"Сетевая ошибка через :{px['port']}: {e}"}
+        return {
+            "valid": False,
+            "profile_name": profile_name,
+            "email": email,
+            "name": name,
+            "port": port,
+            "expiry_text": expiry_text,
+            "online_verified": False,
+            "status_text": "Токен не работает",
+            "error": f"Сетевая ошибка через :{port}: {e}",
+        }
 
-    if resp.status_code == 200:
-        try:
-            data = resp.json()
-        except Exception:
-            data = {}
-        account = data.get("account") if isinstance(data.get("account"), dict) else {}
-        return {"success": True, "email": account.get("email") or account.get("email_address") or "-", "port": px["port"]}
-    if resp.status_code == 401:
-        return {"success": False, "error": "Токен недействителен (401). Активируйте профиль в Claude Code или войдите заново."}
-    return {"success": False, "error": f"Ответ API: HTTP {resp.status_code}"}
+
+def check_all_tokens(cancel_event: Any = None, on_progress: Any = None) -> list[dict[str, Any]]:
+    """Проверяет работоспособность всех сохраненных токенов Claude-аккаунтов."""
+    profiles = list_profiles()
+    results = []
+
+    for idx, p in enumerate(profiles, start=1):
+        if cancel_event and cancel_event.is_set():
+            break
+        pname = p.get("profile_name", "")
+        res = check_token_live(pname, timeout=2.5)
+        res["position"] = idx
+        results.append(res)
+        if on_progress:
+            try:
+                on_progress(len(results), len(profiles), res)
+            except Exception:
+                pass
+
+    return results
+
+
+def validate_profile_token(profile_name: str) -> dict[str, Any]:
+    """Проверяет access-токен профиля запросом к целевому API через выделенный сокет (обратная совместимость)."""
+    res = check_token_live(profile_name, timeout=10.0)
+    return {
+        "success": res.get("valid", False),
+        "email": res.get("email"),
+        "port": res.get("port"),
+        "error": res.get("error") if not res.get("valid") else None,
+        "details": res,
+    }

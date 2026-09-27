@@ -257,6 +257,13 @@ class HerdrConfigApp(tk.Tk):
         self._gemini_batch_cancel_event = threading.Event()
         self._gemini_batch_timer_after_id = None
         self._gemini_batch_start_time = 0.0
+
+        # Состояние сессий узлов Type-B (Claude)
+        self.claude_profiles: list[dict] = []
+        self._claude_batch_check_running = False
+        self._claude_batch_cancel_event = threading.Event()
+        self._claude_batch_timer_after_id = None
+        self._claude_batch_start_time = 0.0
         self.status_var = tk.StringVar(value="")
 
         # Состояние и логгер интеграций
@@ -1258,12 +1265,17 @@ class HerdrConfigApp(tk.Tk):
                 try:
                     res = claude_manager.run_isolation_diagnostic(log_callback=append_log)
                     iso_fresh = claude_manager.check_claude_isolation()
-                    self._update_claude_iso_ui(iso_fresh)
+                    self.after(0, lambda: self._update_claude_iso_ui(iso_fresh))
                     if dlg.winfo_exists():
                         def update_badge():
                             badge_val = res.get("status", "unknown")
+                            p_curr = settings_manager.get_claude_proxy_port()
                             if badge_val == "isolated":
-                                dlg_badge.config(text="🟢 WSL2 ИЗОЛИРОВАН (:1015)", fg=C["green"])
+                                dlg_badge.config(text=f"🟢 WSL2 ИЗОЛИРОВАН (:{p_curr})", fg=C["green"])
+                            elif badge_val == "lockdown":
+                                dlg_badge.config(text="🛡️ KILLSWITCH (БЛОКИРОВКА)", fg=C["accent_peach"])
+                            elif badge_val == "leak":
+                                dlg_badge.config(text="🔴 УТЕЧКА СЕТИ (LEAK)", fg=C["red"])
                             elif badge_val == "direct":
                                 dlg_badge.config(text="⚪ ВЫКЛ (Прямой доступ)", fg=C["subtext"])
                             else:
@@ -1310,14 +1322,25 @@ class HerdrConfigApp(tk.Tk):
 
     def _update_claude_iso_ui(self, res: dict):
         """Обновляет индикаторы бейджа сетевой изоляции узлов Type-B в UI."""
+        if res.get("wsl_kernel_isolated") and hasattr(self, "claude_restriction_var"):
+            if not self.claude_restriction_var.get():
+                self.claude_restriction_var.set(True)
+                if hasattr(self, "claude_restr_btn"):
+                    self.claude_restr_btn.config(
+                        text=t("btn_claude_restriction_on"),
+                        bg=C["green"],
+                        fg="#11111b"
+                    )
         if not hasattr(self, "claude_iso_badge"):
             return
         badge_text = res.get("badge", "[Unknown]")
         level = str(res.get("status", res.get("level", "unknown"))).lower()
         if level in ("isolated", "full"):
             color = C["green"]
-        elif level in ("partial", "warning"):
+        elif level in ("lockdown",):
             color = C["accent_peach"]
+        elif level in ("partial", "warning"):
+            color = C["yellow"]
         elif level in ("direct", "off", "open"):
             color = C["subtext"]
         else:
@@ -2760,19 +2783,44 @@ class HerdrConfigApp(tk.Tk):
         btn_box = tk.Frame(c_top, bg=C["bg"])
         btn_box.pack(side="right")
 
-        tk.Button(
+        self.btn_check_all_claude = tk.Button(
+            btn_box, text=t("btn_check_all_claude"), font=FONT_BOLD,
+            bg=C["card_inner"], fg=C["accent_peach"], activebackground=C["border"],
+            bd=0, padx=10, pady=6, cursor="hand2",
+            command=self.on_check_all_claude_tokens
+        )
+        self.btn_check_all_claude.pack(side="left", padx=(0, 8))
+
+        self.claude_check_status_frame = tk.Frame(btn_box, bg=C["bg"])
+        self.claude_check_timer_lbl = tk.Label(
+            self.claude_check_status_frame, text="⏱️ 0с", font=FONT_BOLD,
+            fg=C["accent_peach"], bg=C["bg"]
+        )
+        self.claude_check_timer_lbl.pack(side="left", padx=(0, 4))
+
+        self.btn_cancel_claude_check = tk.Button(
+            self.claude_check_status_frame, text=" ❌ ", font=FONT_BOLD,
+            bg=C["card_inner"], fg=C["red"], activebackground=C["border"],
+            bd=0, padx=6, pady=4, cursor="hand2",
+            command=self.on_cancel_claude_check
+        )
+        self.btn_cancel_claude_check.pack(side="left", padx=(0, 4))
+
+        self.btn_claude_refresh = tk.Button(
             btn_box, text=t("btn_claude_refresh_profiles"), font=FONT_BOLD,
             bg=C["card_inner"], fg=C["fg"], activebackground=C["border"],
             bd=0, padx=12, pady=6, cursor="hand2",
             command=self.refresh_claude_profiles_async
-        ).pack(side="left", padx=(0, 8))
+        )
+        self.btn_claude_refresh.pack(side="left", padx=(0, 8))
 
-        tk.Button(
+        self.btn_claude_add = tk.Button(
             btn_box, text=t("btn_claude_add_account"), font=FONT_BOLD,
             bg=C["accent_peach"], fg="#11111b", activebackground="#f5c2e7",
             bd=0, padx=12, pady=6, cursor="hand2",
             command=self.on_add_claude_account
-        ).pack(side="left")
+        )
+        self.btn_claude_add.pack(side="left")
 
         # Карточка сокета маршрутизации (выделенный сокет узла Type-B со страницы Routes)
         px_card = tk.Frame(parent, bg=C["card"], bd=1, relief="solid")
@@ -2852,7 +2900,10 @@ class HerdrConfigApp(tk.Tk):
             except Exception:
                 pass
             self.load_claude_profiles_data()
-            self.after(0, self.render_claude_oauth_page)
+            try:
+                self.after(0, self.render_claude_oauth_page)
+            except Exception:
+                pass
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2866,6 +2917,22 @@ class HerdrConfigApp(tk.Tk):
                    status=t("status_online") if online else t("status_offline")),
             fg=C["green"] if online else C["red"],
         )
+
+        # Управление состоянием кнопки пакетной проверки Claude и таймера
+        if getattr(self, "_claude_batch_check_running", False):
+            try:
+                self.btn_check_all_claude.config(state="disabled")
+                if hasattr(self, "claude_check_status_frame") and not self.claude_check_status_frame.winfo_ismapped():
+                    self.claude_check_status_frame.pack(side="left", padx=(0, 8), before=self.btn_claude_refresh)
+            except Exception:
+                pass
+        else:
+            try:
+                self.btn_check_all_claude.config(state="normal")
+                if hasattr(self, "claude_check_status_frame") and self.claude_check_status_frame.winfo_ismapped():
+                    self.claude_check_status_frame.pack_forget()
+            except Exception:
+                pass
 
         st = self.claude_active_status or {}
         if st.get("exists") and st.get("expires_at"):
@@ -2953,12 +3020,21 @@ class HerdrConfigApp(tk.Tk):
                 ).pack(side="left", padx=(0, 6))
 
             if prof.get("exists"):
-                tk.Button(
-                    right, text=t("btn_check"), font=FONT_MAIN,
+                btn_test = tk.Button(
+                    right, text="🔍 Проверить", font=FONT_MAIN,
                     bg=C["card_inner"], fg=C["fg"], activebackground=C["border"],
                     bd=0, padx=8, pady=4, cursor="hand2",
                     command=lambda name=p_name: self.on_test_claude_token(name)
-                ).pack(side="left", padx=(0, 6))
+                )
+                btn_test.pack(side="left", padx=(0, 6))
+
+                btn_reauth = tk.Button(
+                    right, text=t("btn_reauth_claude"), font=FONT_MAIN,
+                    bg=C["card_inner"], fg=C["accent_peach"], activebackground=C["border"],
+                    bd=0, padx=8, pady=4, cursor="hand2",
+                    command=lambda name=p_name: self.on_reauth_claude_profile(name)
+                )
+                btn_reauth.pack(side="left", padx=(0, 6))
 
             tk.Button(
                 right, text="✏️", font=FONT_MAIN,
@@ -3013,18 +3089,363 @@ class HerdrConfigApp(tk.Tk):
         (messagebox.showinfo if ok else messagebox.showerror)(t("tab_claude_oauth"), msg)
         self.refresh_claude_profiles_async()
 
-    def on_test_claude_token(self, profile_name: str):
-        def worker():
-            res = claude_oauth_manager.validate_profile_token(profile_name)
+    def on_reauth_claude_profile(self, profile_name: str):
+        """Перезапись токена профиля Claude через терминал WSL с сохранением в тот же профиль."""
+        if not messagebox.askyesno(
+            t("dlg_claude_reauth_title"),
+            t("dlg_claude_reauth_confirm", profile=profile_name),
+            parent=self
+        ):
+            return
 
-            def show():
-                if res.get("success"):
-                    messagebox.showinfo(t("tab_claude_oauth"), t("claude_token_valid", email=res.get("email"), port=res.get("port")))
+        with token_vault_manager.auto_unlock_context():
+            ok, msg = claude_oauth_manager.launch_login_terminal(profile_name, overwrite=True)
+
+        if ok:
+            messagebox.showinfo(
+                t("dlg_claude_reauth_title"),
+                t("msg_claude_reauth_started", profile=profile_name) + "\n\n" + t("claude_login_steps"),
+                parent=self
+            )
+            self._start_claude_token_update_watcher(profile_name)
+        else:
+            messagebox.showerror(t("error"), msg, parent=self)
+
+    def _start_claude_token_update_watcher(self, profile_name: str):
+        """Фоновый поллер ожидания обновления токена Claude после авторизации в браузере."""
+        t_path = claude_oauth_manager.PROFILES_DIR / profile_name / claude_oauth_manager.CREDENTIALS_NAME
+        initial_mtime = t_path.stat().st_mtime if t_path.exists() else 0.0
+
+        def check_loop(attempts_left: int):
+            if attempts_left <= 0:
+                return
+            if t_path.exists():
+                curr_mtime = t_path.stat().st_mtime
+                if curr_mtime > initial_mtime:
+                    try:
+                        import extended_logger
+                        extended_logger.write_ext_log("OAUTH_SYNC", f"Обнаружена перезапись токена Claude для '{profile_name}'")
+                    except Exception:
+                        pass
+                    st = getattr(self, "claude_active_status", {}) or {}
+                    if st.get("profile_name") == profile_name:
+                        claude_oauth_manager.switch_profile(profile_name)
+                    self.refresh_claude_profiles_async()
+                    return
+            self.after(2000, lambda: check_loop(attempts_left - 1))
+
+        self.after(2000, lambda: check_loop(60))
+
+    def on_test_claude_token(self, profile_name: str):
+        """Проверка работоспособности токена аккаунта Claude с подробным отчетом по аналогии с Gemini."""
+        pos = "?"
+        for idx, p in enumerate(getattr(self, "claude_profiles", []), start=1):
+            if p.get("profile_name") == profile_name:
+                pos = str(idx)
+                break
+
+        if hasattr(self, "status_var"):
+            self.status_var.set(f"Проверка токена Claude #{pos} {profile_name}...")
+
+        def worker():
+            res = claude_oauth_manager.check_token_live(profile_name)
+
+            def show_res():
+                if hasattr(self, "status_var"):
+                    self.status_var.set("Проверка токена Claude завершена")
+                try:
+                    self.bring_to_front()
+                except Exception:
+                    pass
+                email = res.get("email") or profile_name
+                is_valid = res.get("valid", False)
+                status_str = t("status_token_works") if is_valid else t("status_token_broken")
+                port = res.get("port", claude_oauth_manager.get_claude_oauth_proxy()["port"])
+                exp = res.get("expiry_text", "-")
+
+                result_line = f"#{pos} - {email} - {status_str}"
+
+                details = [result_line, ""]
+                details.append(f"• Профиль: {profile_name}")
+                if res.get("name") and res.get("name") != "-":
+                    details.append(f"• Имя: {res.get('name')}")
+                details.append(f"• Выделенный сокет: :{port}")
+                if is_valid:
+                    details.append(f"• Срок действия: {exp}")
+                    if res.get("online_verified"):
+                        details.append("• Онлайн-проверка Claude API: Подтверждена")
                 else:
-                    messagebox.showerror(t("tab_claude_oauth"), str(res.get("error")))
-            self.after(0, show)
+                    details.append(f"• Ошибка: {res.get('error') or 'Неизвестная ошибка'}")
+
+                msg_text = "\n".join(details)
+                if is_valid:
+                    messagebox.showinfo(t("dlg_token_check_title"), msg_text, parent=self)
+                else:
+                    messagebox.showwarning(t("dlg_token_check_title"), msg_text, parent=self)
+
+            self.after(0, show_res)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def on_check_all_claude_tokens(self):
+        """Пакетная фоновая проверка токенов всех аккаунтов Claude с секундомером и отменой."""
+        if getattr(self, "_claude_batch_check_running", False):
+            return
+
+        self._claude_batch_check_running = True
+        self._claude_batch_cancel_event.clear()
+        self._claude_batch_start_time = time.time()
+
+        try:
+            import extended_logger
+            extended_logger.write_ext_log("UI_EVENT", "Нажата кнопка 'Проверить все аккаунты Claude'")
+        except Exception:
+            pass
+
+        try:
+            self.btn_check_all_claude.config(state="disabled")
+            self.claude_check_timer_lbl.config(text="⏱️ 0с")
+            self.claude_check_status_frame.pack(side="left", padx=(0, 8), before=self.btn_claude_refresh)
+        except Exception:
+            pass
+
+        def tick():
+            if not getattr(self, "_claude_batch_check_running", False):
+                return
+            elapsed = int(time.time() - self._claude_batch_start_time)
+            try:
+                self.claude_check_timer_lbl.config(text=f"⏱️ {elapsed}с")
+            except Exception:
+                pass
+            self._claude_batch_timer_after_id = self.after(1000, tick)
+
+        self._claude_batch_timer_after_id = self.after(1000, tick)
+
+        def progress_cb(done, total, res):
+            elapsed = int(time.time() - self._claude_batch_start_time)
+            msg = t("lbl_checking_progress", done=done, total=total, elapsed=elapsed)
+            try:
+                self.after(0, lambda m=msg: self.status_var.set(m) if hasattr(self, "status_var") else None)
+            except Exception:
+                pass
+
+        def worker():
+            results = []
+            was_cancelled = False
+            try:
+                results = claude_oauth_manager.check_all_tokens(
+                    cancel_event=self._claude_batch_cancel_event,
+                    on_progress=progress_cb
+                )
+                was_cancelled = self._claude_batch_cancel_event.is_set()
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+            finally:
+                self.after(0, lambda res=results, canc=was_cancelled: self._on_claude_batch_check_done(res, canc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_cancel_claude_check(self):
+        """Отмена текущей пакетной проверки аккаунтов Claude."""
+        if getattr(self, "_claude_batch_check_running", False):
+            self._claude_batch_cancel_event.set()
+            try:
+                self.claude_check_timer_lbl.config(text="⏱️ Отмена...")
+            except Exception:
+                pass
+
+    def _on_claude_batch_check_done(self, results: list[dict], was_cancelled: bool):
+        """Завершение пакетной проверки аккаунтов Claude: остановка таймера и вывод диалога."""
+        self._claude_batch_check_running = False
+        if getattr(self, "_claude_batch_timer_after_id", None):
+            try:
+                self.after_cancel(self._claude_batch_timer_after_id)
+            except Exception:
+                pass
+            self._claude_batch_timer_after_id = None
+
+        try:
+            self.claude_check_status_frame.pack_forget()
+            self.btn_check_all_claude.config(state="normal")
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "status_var"):
+                self.status_var.set("Проверка аккаунтов Claude завершена")
+        except Exception:
+            pass
+
+        try:
+            self._show_claude_batch_results_dialog(results, was_cancelled)
+        except Exception as e:
+            try:
+                import extended_logger
+                extended_logger.write_ext_log("ERROR", f"Ошибка открытия модального окна результатов Claude: {e}")
+            except Exception:
+                pass
+
+    def _show_claude_batch_results_dialog(self, results: list[dict], was_cancelled: bool):
+        """Модальное окно с результатами проверки всех аккаунтов Claude."""
+        try:
+            import extended_logger
+            extended_logger.write_ext_log("UI_EVENT", f"Отображение модального окна проверки Claude (аккаунтов: {len(results)}, отменено: {was_cancelled})")
+        except Exception:
+            pass
+
+        try:
+            self.bring_to_front()
+        except Exception:
+            pass
+
+        dlg = tk.Toplevel(self)
+        dlg.title(t("dlg_claude_check_results_title"))
+        dlg.configure(bg=C["bg"])
+        dlg.transient(self)
+
+        try:
+            self.update_idletasks()
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            x = self.winfo_x() + max(0, (self.winfo_width() - 720) // 2)
+            y = self.winfo_y() + max(0, (self.winfo_height() - 540) // 2)
+            if x < 10 or x > sw - 200:
+                x = max(10, (sw - 720) // 2)
+            if y < 10 or y > sh - 200:
+                y = max(10, (sh - 540) // 2)
+            dlg.geometry(f"720x540+{x}+{y}")
+        except Exception:
+            dlg.geometry("720x540")
+        dlg.minsize(620, 420)
+
+        try:
+            dlg.deiconify()
+            dlg.lift()
+            dlg.attributes("-topmost", True)
+            dlg.focus_force()
+            dlg.after(350, lambda: dlg.attributes("-topmost", True) if dlg.winfo_exists() else None)
+        except Exception:
+            pass
+
+        try:
+            dlg.grab_set()
+        except Exception:
+            dlg.after(100, lambda: dlg.grab_set() if dlg.winfo_exists() else None)
+
+        try:
+            self.bell()
+        except Exception:
+            pass
+
+        top_f = tk.Frame(dlg, bg=C["bg"])
+        top_f.pack(fill="x", padx=16, pady=(14, 8))
+
+        tk.Label(
+            top_f, text="🔍 " + t("dlg_claude_check_results_title"),
+            font=FONT_TITLE, fg=C["accent_peach"], bg=C["bg"]
+        ).pack(side="left")
+
+        total_count = len(results)
+        valid_count = sum(1 for r in results if r.get("valid"))
+        stats_text = f"Работает: {valid_count} из {total_count}"
+        if was_cancelled:
+            stats_text += " (отменено)"
+
+        tk.Label(
+            top_f, text=stats_text,
+            font=FONT_BOLD,
+            fg=C["green"] if valid_count == total_count and not was_cancelled else C["accent_peach"],
+            bg=C["bg"]
+        ).pack(side="right")
+
+        card_wrap = tk.Frame(dlg, bg=C["card"], bd=1, relief="solid")
+        card_wrap.configure(highlightbackground=C["border"], highlightthickness=1)
+        card_wrap.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+
+        txt = tk.Text(
+            card_wrap, bg="#11111b", fg=C["fg"], insertbackground=C["fg"],
+            selectbackground=C["border"], font=FONT_MAIN, wrap="word",
+            relief="flat", bd=0, padx=14, pady=12
+        )
+        sc = ttk.Scrollbar(card_wrap, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=sc.set)
+        sc.pack(side="right", fill="y")
+        txt.pack(side="left", fill="both", expand=True)
+
+        txt.tag_config("valid", foreground=C["green"], font=FONT_BOLD)
+        txt.tag_config("invalid", foreground=C["red"], font=FONT_BOLD)
+        txt.tag_config("dim", foreground=C["subtext"], font=FONT_SUB)
+
+        lines_to_copy = []
+        if was_cancelled:
+            cancel_hdr = f"⚠️ {t('msg_check_cancelled')} (проверено {total_count})\n\n"
+            txt.insert("end", cancel_hdr, "dim")
+            lines_to_copy.append(f"⚠️ {t('msg_check_cancelled')}\n")
+
+        if not results:
+            txt.insert("end", "Нет проверенных аккаунтов Claude.\n", "dim")
+
+        for idx, r in enumerate(results, start=1):
+            pos = r.get("position", idx)
+            email = r.get("email") or r.get("profile_name", f"claude-{pos}")
+            is_valid = r.get("valid", False)
+            status_text = t("status_token_works") if is_valid else t("status_token_broken")
+
+            line_str = f"#{pos} - {email} - {status_text}"
+            lines_to_copy.append(line_str)
+
+            txt.insert("end", f"#{pos} - {email} - ")
+            txt.insert("end", f"{status_text}\n", "valid" if is_valid else "invalid")
+
+            details = []
+            if r.get("port"):
+                details.append(f"Сокет :{r['port']}")
+            if r.get("expiry_text"):
+                details.append(r["expiry_text"])
+            if not is_valid and r.get("error"):
+                details.append(f"Причина: {r['error']}")
+            if details:
+                txt.insert("end", f"     └─ {' • '.join(details)}\n", "dim")
+            txt.insert("end", "\n")
+
+        txt.configure(state="disabled")
+
+        b_bar = tk.Frame(dlg, bg=C["bg"])
+        b_bar.pack(fill="x", padx=16, pady=(0, 14))
+
+        def _close_dlg():
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            dlg.destroy()
+
+        dlg.protocol("WM_DELETE_WINDOW", _close_dlg)
+
+        def copy_to_clipboard():
+            raw_text = "\n".join(lines_to_copy)
+            dlg.clipboard_clear()
+            dlg.clipboard_append(raw_text)
+            try:
+                if hasattr(self, "status_var"):
+                    self.status_var.set("Результаты проверки Claude скопированы в буфер обмена")
+            except Exception:
+                pass
+
+        btn_copy = tk.Button(
+            b_bar, text="📋 Копировать отчет", font=FONT_BOLD,
+            bg=C["card_inner"], fg=C["accent_peach"], activebackground=C["border"],
+            bd=0, padx=12, pady=6, cursor="hand2", command=copy_to_clipboard
+        )
+        btn_copy.pack(side="left")
+
+        btn_close = tk.Button(
+            b_bar, text="Закрыть", font=FONT_BOLD,
+            bg=C["card_inner"], fg=C["fg"], activebackground=C["border"],
+            bd=0, padx=14, pady=6, cursor="hand2", command=_close_dlg
+        )
+        btn_close.pack(side="right")
 
     def on_rename_claude_profile(self, profile_name: str):
         new_name = simpledialog.askstring(t("tab_claude_oauth"), t("dlg_profile_name"), initialvalue=profile_name, parent=self)
@@ -3677,6 +4098,170 @@ class HerdrConfigApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _prompt_restore_options(self, filepath: str) -> tuple[bool, bool, bool, bool]:
+        """Отображает модальное окно с выбором компонентов для восстановления (Soft Restore).
+        
+        Возвращает (confirmed, restore_herdr, restore_oauth, restore_aionui).
+        """
+        dlg = tk.Toplevel(self)
+        dlg.title(t("dlg_restore_options_title"))
+        dlg.configure(bg=C["bg"])
+        dlg.transient(self)
+        dlg.resizable(False, False)
+
+        try:
+            self.update_idletasks()
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            w, h = 600, 410
+            x = self.winfo_x() + max(0, (self.winfo_width() - w) // 2)
+            y = self.winfo_y() + max(0, (self.winfo_height() - h) // 2)
+            if x < 10 or x > sw - 200:
+                x = max(10, (sw - w) // 2)
+            if y < 10 or y > sh - 200:
+                y = max(10, (sh - h) // 2)
+            dlg.geometry(f"{w}x{h}+{x}+{y}")
+        except Exception:
+            dlg.geometry("600x410")
+
+        result = {
+            "confirmed": False,
+            "herdr": True,
+            "oauth": True,
+            "aionui": False
+        }
+
+        top_f = tk.Frame(dlg, bg=C["bg"])
+        top_f.pack(fill="x", padx=18, pady=(16, 10))
+
+        tk.Label(
+            top_f, text="📦 " + t("dlg_restore_options_title"),
+            font=FONT_TITLE, fg=C["accent_blue"], bg=C["bg"]
+        ).pack(anchor="w")
+
+        fn = Path(filepath).name
+        tk.Label(
+            top_f, text=t("dlg_restore_options_prompt", file=fn),
+            font=FONT_MAIN, fg=C["fg"], bg=C["bg"], justify="left"
+        ).pack(anchor="w", pady=(4, 0))
+
+        card = tk.Frame(dlg, bg=C["card"], bd=1, relief="solid")
+        card.configure(highlightbackground=C["border"], highlightthickness=1)
+        card.pack(fill="both", expand=True, padx=18, pady=(0, 14))
+
+        var_herdr = tk.BooleanVar(value=True)
+        var_oauth = tk.BooleanVar(value=True)
+        var_aionui = tk.BooleanVar(value=False)
+
+        # 1. Herdr Config
+        f_herdr = tk.Frame(card, bg=C["card"])
+        f_herdr.pack(fill="x", padx=16, pady=(14, 6))
+        cb_herdr = tk.Checkbutton(
+            f_herdr, text=t("chk_restore_herdr_config"),
+            variable=var_herdr, font=FONT_BOLD,
+            fg=C["fg"], bg=C["card"], activebackground=C["card"],
+            activeforeground=C["fg"], selectcolor=C["card_inner"], bd=0
+        )
+        cb_herdr.pack(anchor="w")
+        tk.Label(
+            f_herdr, text="settings.json, proxies.json, .env (WSL_TARGET_HOST, порты)",
+            font=FONT_SMALL, fg=C["subtext"], bg=C["card"]
+        ).pack(anchor="w", padx=(24, 0))
+
+        # 2. OAuth Profiles
+        f_oauth = tk.Frame(card, bg=C["card"])
+        f_oauth.pack(fill="x", padx=16, pady=(6, 6))
+        cb_oauth = tk.Checkbutton(
+            f_oauth, text=t("chk_restore_oauth_profiles"),
+            variable=var_oauth, font=FONT_BOLD,
+            fg=C["fg"], bg=C["card"], activebackground=C["card"],
+            activeforeground=C["fg"], selectcolor=C["card_inner"], bd=0
+        )
+        cb_oauth.pack(anchor="w")
+        tk.Label(
+            f_oauth, text="gemini_profiles.json, claude_profiles.json, токены сессий",
+            font=FONT_SMALL, fg=C["subtext"], bg=C["card"]
+        ).pack(anchor="w", padx=(24, 0))
+
+        # 3. AionUi SQLite DB
+        f_aionui = tk.Frame(card, bg=C["card"])
+        f_aionui.pack(fill="x", padx=16, pady=(6, 12))
+        
+        warn_lbl = tk.Label(
+            f_aionui, text=t("lbl_restore_aionui_warn"),
+            font=FONT_SMALL, fg=C["subtext"], bg=C["card"], justify="left", wraplength=520
+        )
+
+        def on_aionui_toggle():
+            if var_aionui.get():
+                warn_lbl.config(fg=C["accent_red"])
+            else:
+                warn_lbl.config(fg=C["subtext"])
+
+        cb_aionui = tk.Checkbutton(
+            f_aionui, text=t("chk_restore_aionui_db"),
+            variable=var_aionui, command=on_aionui_toggle, font=FONT_BOLD,
+            fg=C["fg"], bg=C["card"], activebackground=C["card"],
+            activeforeground=C["fg"], selectcolor=C["card_inner"], bd=0
+        )
+        cb_aionui.pack(anchor="w")
+        warn_lbl.pack(anchor="w", padx=(24, 0), pady=(2, 0))
+
+        # Bottom Bar
+        b_bar = tk.Frame(dlg, bg=C["bg"])
+        b_bar.pack(fill="x", padx=18, pady=(0, 16))
+
+        def _on_confirm():
+            if not (var_herdr.get() or var_oauth.get() or var_aionui.get()):
+                messagebox.showwarning(
+                    t("dlg_restore_options_title"),
+                    t("msg_restore_nothing_selected"),
+                    parent=dlg
+                )
+                return
+            result["confirmed"] = True
+            result["herdr"] = bool(var_herdr.get())
+            result["oauth"] = bool(var_oauth.get())
+            result["aionui"] = bool(var_aionui.get())
+            dlg.destroy()
+
+        def _on_cancel():
+            result["confirmed"] = False
+            dlg.destroy()
+
+        dlg.protocol("WM_DELETE_WINDOW", _on_cancel)
+
+        btn_cancel = tk.Button(
+            b_bar, text="Отмена", font=FONT_BOLD,
+            bg=C["card_inner"], fg=C["fg"], activebackground=C["border"],
+            bd=0, padx=14, pady=6, cursor="hand2", command=_on_cancel
+        )
+        btn_cancel.pack(side="right", padx=(8, 0))
+
+        btn_confirm = tk.Button(
+            b_bar, text=t("btn_confirm_restore"), font=FONT_BOLD,
+            bg=C["accent_blue"], fg="#ffffff", activebackground=C["accent_hover"],
+            bd=0, padx=16, pady=6, cursor="hand2", command=_on_confirm
+        )
+        btn_confirm.pack(side="right")
+
+        try:
+            dlg.deiconify()
+            dlg.lift()
+            dlg.attributes("-topmost", True)
+            dlg.focus_force()
+            dlg.after(200, lambda: dlg.attributes("-topmost", False) if dlg.winfo_exists() else None)
+        except Exception:
+            pass
+
+        try:
+            dlg.grab_set()
+        except Exception:
+            pass
+
+        self.wait_window(dlg)
+        return (result["confirmed"], result["herdr"], result["oauth"], result["aionui"])
+
     def on_import_backup(self):
         pw = self.backup_password_var.get().strip()
         if not pw:
@@ -3692,22 +4277,29 @@ class HerdrConfigApp(tk.Tk):
         if not f:
             return
 
-        if not messagebox.askyesno(
-            "Подтверждение импорта",
-            "Импорт бэкапа полностью восстановит все настройки, прокси, токены и профили аккаунтов.\n\nПродолжить?"
-        ):
+        confirmed, r_herdr, r_oauth, r_aionui = self._prompt_restore_options(f)
+        if not confirmed:
             return
 
         self.btn_import_backup.config(state="disabled", text="⏳ Восстановление...")
 
         def worker():
-            ok, msg, manifest = backup_manager.restore_encrypted_backup(f, pw)
+            ok, msg, manifest = backup_manager.restore_encrypted_backup(
+                f, pw,
+                restore_herdr_config=r_herdr,
+                restore_oauth_profiles=r_oauth,
+                restore_aionui_db=r_aionui,
+            )
             def done():
                 self.btn_import_backup.config(state="normal", text="📥 Восстановить из файла (Импорт)")
                 if ok:
-                    self.load_backup_config_data()
-                    self.load_proxies_data()
-                    self.load_gemini_profiles_data()
+                    if r_herdr:
+                        self.load_backup_config_data()
+                        self.load_proxies_data()
+                    if r_oauth:
+                        self.load_gemini_profiles_data()
+                        if hasattr(self, "load_claude_profiles_data"):
+                            self.load_claude_profiles_data()
                     self.render_backup_page()
                     if hasattr(self, "_load_initial_console_logs"):
                         self._load_initial_console_logs()
@@ -3717,7 +4309,10 @@ class HerdrConfigApp(tk.Tk):
                     messagebox.showinfo("Импорт бэкапа", msg)
                 else:
                     messagebox.showerror("Ошибка импорта", msg)
-            self.after(0, done)
+            try:
+                self.after(0, done)
+            except Exception:
+                pass
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -3739,20 +4334,26 @@ class HerdrConfigApp(tk.Tk):
             messagebox.showwarning("Внимание", "Сначала введите пароль для расшифровки бэкапа!")
             return
 
-        fn = Path(filepath).name
-        if not messagebox.askyesno(
-            "Подтверждение импорта",
-            f"Восстановить систему из файла:\n{fn}?\n\nТекущие данные будут заменены содержимым бэкапа."
-        ):
+        confirmed, r_herdr, r_oauth, r_aionui = self._prompt_restore_options(filepath)
+        if not confirmed:
             return
 
         def worker():
-            ok, msg, _ = backup_manager.restore_encrypted_backup(filepath, pw)
+            ok, msg, _ = backup_manager.restore_encrypted_backup(
+                filepath, pw,
+                restore_herdr_config=r_herdr,
+                restore_oauth_profiles=r_oauth,
+                restore_aionui_db=r_aionui,
+            )
             def done():
                 if ok:
-                    self.load_backup_config_data()
-                    self.load_proxies_data()
-                    self.load_gemini_profiles_data()
+                    if r_herdr:
+                        self.load_backup_config_data()
+                        self.load_proxies_data()
+                    if r_oauth:
+                        self.load_gemini_profiles_data()
+                        if hasattr(self, "load_claude_profiles_data"):
+                            self.load_claude_profiles_data()
                     self.render_backup_page()
                     if hasattr(self, "_load_initial_console_logs"):
                         self._load_initial_console_logs()
@@ -3762,7 +4363,10 @@ class HerdrConfigApp(tk.Tk):
                     messagebox.showinfo("Импорт бэкапа", msg)
                 else:
                     messagebox.showerror("Ошибка импорта", msg)
-            self.after(0, done)
+            try:
+                self.after(0, done)
+            except Exception:
+                pass
 
         threading.Thread(target=worker, daemon=True).start()
 

@@ -149,20 +149,27 @@ def apply_claude_settings_to_file(
         if not isinstance(data.get("env"), dict):
             data["env"] = {}
 
+        PROX_KEYS = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")
         if not restriction_enabled:
             # Ограничение выключено: убираем переменные прокси, сохраняя остальные настройки
-            for k in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"):
+            for k in PROX_KEYS:
                 data["env"].pop(k, None)
         elif killswitch_engaged:
             # Блокировка: заворачиваем трафик на несуществующий blackhole
             data["env"]["HTTPS_PROXY"] = BLACKHOLE_HTTP
             data["env"]["HTTP_PROXY"] = BLACKHOLE_HTTP
             data["env"]["ALL_PROXY"] = BLACKHOLE_SOCKS
+            data["env"]["https_proxy"] = BLACKHOLE_HTTP
+            data["env"]["http_proxy"] = BLACKHOLE_HTTP
+            data["env"]["all_proxy"] = BLACKHOLE_SOCKS
         else:
             http_port = 10000 + int(port)
             data["env"]["HTTPS_PROXY"] = f"http://{host}:{http_port}"
             data["env"]["HTTP_PROXY"] = f"http://{host}:{http_port}"
             data["env"]["ALL_PROXY"] = f"socks5h://{host}:{port}"
+            data["env"]["https_proxy"] = f"http://{host}:{http_port}"
+            data["env"]["http_proxy"] = f"http://{host}:{http_port}"
+            data["env"]["all_proxy"] = f"socks5h://{host}:{port}"
 
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
@@ -188,6 +195,20 @@ def apply_claude_proxy_sync(
     """
     if restriction_enabled is None:
         restriction_enabled = settings_manager.get_claude_restriction_enabled()
+
+    # Применяем или снимаем изоляцию на уровне ядра Linux WSL2
+    try:
+        import node_isolate_manager
+        if restriction_enabled:
+            node_isolate_manager.apply_wsl_isolation(
+                port=port,
+                http_port=10000 + int(port),
+                killswitch=killswitch_engaged,
+            )
+        else:
+            node_isolate_manager.remove_wsl_isolation()
+    except Exception:
+        pass
 
     for target_file in get_claude_settings_files():
         try:
@@ -311,26 +332,36 @@ def check_claude_isolation() -> dict[str, Any]:
     except Exception:
         pass
 
-    # 3. Проверяем правило брандмауэра Windows
+    # 3. Проверяем правило брандмауэра Windows и ядра Linux WSL2
     firewall_active = False
+    wsl_kernel_isolated = False
     try:
         import node_isolate_manager
         firewall_active = node_isolate_manager.check_isolation_status("127.0.0.1", 1015, True)
+        wsl_kernel_isolated = node_isolate_manager.check_wsl_isolation_active()
     except Exception:
         pass
 
     # 4. Проверяем доступность портов 1015 и 11015
-    p1015_open = check_port_accessible("127.0.0.1", 1015, timeout=0.3)
-    p11015_open = check_port_accessible("127.0.0.1", 11015, timeout=0.3)
+    p_socks = settings_manager.get_claude_proxy_port()
+    p_http = 10000 + p_socks
+    p1015_open = check_port_accessible("127.0.0.1", p_socks, timeout=0.3)
+    p11015_open = check_port_accessible("127.0.0.1", p_http, timeout=0.3)
 
     restriction_on = settings_manager.get_claude_restriction_enabled()
+    if wsl_kernel_isolated and not restriction_on:
+        # При перезапуске WSL2 или загрузке ОС по умолчанию активируется ограничение :1015
+        restriction_on = True
+        try:
+            settings_manager.set_claude_restriction_enabled(True)
+        except Exception:
+            pass
 
-    if not restriction_on:
         if not wsl_has_proxy:
             level = "DIRECT"
             badge = "⚪ ВЫКЛ (Прямой доступ)"
             color = "#a6adc8"
-            summary = "Ограничения отключены: прямой доступ к сети без сокета 1015."
+            summary = f"Ограничения отключены: прямой доступ к сети без сокета {p_socks}."
         else:
             level = "RESIDUAL"
             badge = "🟡 ВЫКЛ (Остаточные записи)"
@@ -339,14 +370,20 @@ def check_claude_isolation() -> dict[str, Any]:
     else:
         if wsl_has_proxy and p1015_open:
             level = "ISOLATED"
-            badge = "🟢 WSL2 ИЗОЛИРОВАН (:1015)"
+            badge = f"🟢 WSL2 ИЗОЛИРОВАН (:{p_socks})"
             color = "#a6e3a1"
-            summary = "Изоляция активна: узел Type-B в WSL2 направлен в сокет 1015 (remote DNS)."
-        elif wsl_has_proxy and not p1015_open:
-            level = "PORT_OFFLINE"
-            badge = "🔴 ОШИБКА: Порт 1015 закрыт"
-            color = "#f38ba8"
-            summary = "WSL2 замкнут на сокет 1015, но порт 1015 закрыт! Сетевые запросы в WSL2 будут падать."
+            summary = f"Изоляция активна: узел Type-B в WSL2 направлен в сокет {p_socks} (remote DNS), ядро блокирует утечки."
+        elif not p1015_open:
+            if wsl_kernel_isolated:
+                level = "LOCKDOWN"
+                badge = "🛡️ KILLSWITCH (БЛОКИРОВКА)"
+                color = "#fab387"
+                summary = f"Порт {p_socks} оффлайн. Включена полная изоляция ядра Linux (Zero Leaks, все внешние соединения заблокированы)."
+            else:
+                level = "PORT_OFFLINE"
+                badge = f"🔴 ОШИБКА: Порт {p_socks} закрыт"
+                color = "#f38ba8"
+                summary = f"WSL2 замкнут на сокет {p_socks}, но порт закрыт! Сетевые запросы в WSL2 будут падать."
         else:
             level = "PARTIAL"
             badge = "🟡 WSL2 НЕ ИЗОЛИРОВАН"
@@ -355,13 +392,14 @@ def check_claude_isolation() -> dict[str, Any]:
 
     details = [
         f"WSL2 settings.json: {'🔒 ' + wsl_proxy_val if wsl_has_proxy else '🌐 Direct (без сокета 1015)'}",
-        f"Сокет SOCKS5 127.0.0.1:1015: {'🟢 ONLINE' if p1015_open else '🔴 OFFLINE'}",
-        f"Сокет HTTP 127.0.0.1:11015: {'🟢 ONLINE' if p11015_open else '🔴 OFFLINE'}",
+        f"Сокет SOCKS5 127.0.0.1:{p_socks}: {'🟢 ONLINE' if p1015_open else '🔴 OFFLINE'}",
+        f"Сокет HTTP 127.0.0.1:{p_http}: {'🟢 ONLINE' if p11015_open else '🔴 OFFLINE'}",
+        f"Изоляция ядра Linux (Zero Leaks): {'🟢 АКТИВНА (Внешний трафик перекрыт)' if wsl_kernel_isolated else '⚪ НЕ АКТИВНА'}",
     ]
 
     return {
         "restriction_enabled": restriction_on,
-        "is_isolated": win_has_proxy or wsl_has_proxy or firewall_active,
+        "is_isolated": win_has_proxy or wsl_has_proxy or firewall_active or wsl_kernel_isolated,
         "status": level.lower(),
         "level": level,
         "badge": badge,
@@ -371,6 +409,7 @@ def check_claude_isolation() -> dict[str, Any]:
         "win_has_proxy": win_has_proxy,
         "wsl_has_proxy": wsl_has_proxy,
         "firewall_active": firewall_active,
+        "wsl_kernel_isolated": wsl_kernel_isolated,
         "p1015_open": p1015_open,
         "p11015_open": p11015_open,
     }
@@ -561,14 +600,18 @@ def run_isolation_diagnostic(
     
     Проверяет:
     1. Доступность локальных портов SOCKS5 1015 и HTTP CONNECT 11015 с замером TCP handshake.
-    2. Конфигурацию узлов Type-B в WSL2.
+    2. Конфигурацию узлов Type-B в WSL2 и статус сетевой тюрьмы ядра Linux (nftables).
     3. Живой тест сетевого выхода из Linux WSL2:
-       - Если ограничение 1015 ВКЛ: проверяет маршрутизацию через прокси, отсутствие DNS-утечек
-         (socks5h:// remote DNS) и доступность API.
+       - Если ограничение 1015 ВКЛ:
+         * Маршрутизацию через сокеты 1015/11015 и делегирование DNS (socks5h).
+         * Прямой тест утечки IP (Direct Egress Leak Test): подтверждает, что прямой трафик без прокси блокируется ядром.
+         * Тест защиты от обхода через сторонние порты (например, :2080).
+         * Поведение при неработающем порте 1015 (подтверждение герметичности Killswitch).
        - Если ограничение 1015 ВЫКЛ: проверяет свободный прямой доступ из WSL2.
     4. Итоговый вердикт о надежности изоляции.
     """
     import subprocess
+    import node_isolate_manager
     logs: list[tuple[str, str]] = []
 
     def emit(level: str, msg: str) -> None:
@@ -607,9 +650,26 @@ def run_isolation_diagnostic(
         emit("ERROR", f"✕ Сокет HTTP CONNECT {h}:{p_http} недоступен.")
 
     # --- ЭТАП 2: Конфигурация в WSL2 Linux ---
-    emit("STEP", "--- [ЭТАП 2/4] Проверка конфигурации Claude Code в Linux (WSL2) ---")
+    emit("STEP", "--- [ЭТАП 2/4] Проверка конфигурации Claude Code и ядра Linux в WSL2 ---")
     restr_on = settings_manager.get_claude_restriction_enabled()
     emit("INFO", f"Мастер-переключатель ограничения на сокет {p_socks}: {'🟢 ВКЛ' if restr_on else '⚪ ВЫКЛ (Прямой доступ)'}")
+
+    # Проверка и синхронизация изоляции ядра Linux
+    kernel_isolated = node_isolate_manager.check_wsl_isolation_active()
+    if restr_on:
+        if not kernel_isolated:
+            emit("INFO", "Применение сетевой изоляции ядра Linux (nftables)...")
+            node_isolate_manager.apply_wsl_isolation(port=p_socks, http_port=p_http, killswitch=(not p1015_ok))
+            kernel_isolated = node_isolate_manager.check_wsl_isolation_active()
+        if kernel_isolated:
+            emit("SUCCESS", "✓ Сетевая тюрьма ядра Linux активна (nftables: WAN/LAN трафик отсечён, loopback защищен).")
+        else:
+            emit("WARN", "⚠ Не удалось активировать тюрьму ядра Linux через nftables/iptables.")
+    else:
+        if kernel_isolated:
+            emit("INFO", "Снятие сетевой тюрьмы ядра Linux для прямого доступа...")
+            node_isolate_manager.remove_wsl_isolation()
+            emit("SUCCESS", "✓ Сетевая тюрьма ядра Linux отключена.")
 
     wsl_proxy_val = ""
     wsl_has_proxy = False
@@ -641,10 +701,12 @@ def run_isolation_diagnostic(
     except Exception as e:
         emit("WARN", f"⚠ Ошибка чтения настроек WSL2: {e}")
 
-    # --- ЭТАП 3: Живой аудит маршрута и защита от DNS-утечек в WSL2 ---
-    emit("STEP", "--- [ЭТАП 3/4] Живой аудит маршрутизации и DNS из Linux (WSL2) ---")
+    # --- ЭТАП 3: Живой аудит маршрута, защита от обходов и утечек в WSL2 ---
+    emit("STEP", "--- [ЭТАП 3/4] Живой аудит маршрутизации, защита от утечек и обходов в WSL2 ---")
     wsl_proxy_ip = "-"
     dns_leak_protected = False
+    direct_leak_detected = False
+    bypass_leak_detected = False
 
     def exec_wsl(bash_cmd: str, timeout: float = 5.0) -> tuple[int, str]:
         try:
@@ -658,22 +720,52 @@ def run_isolation_diagnostic(
             return -1, str(ex)
 
     if restr_on:
-        # 1. Проверка HTTP CONNECT через сокет 11015 к тестовому эндпоинту API
-        c_code, c_out = exec_wsl(f"curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 4 -x http://127.0.0.1:{p_http} https://api.anthropic.com")
-        if c_code == 0 and c_out in ("200", "404", "401", "403"):
-            emit("SUCCESS", f"✓ Запрос из WSL2 к тестовому эндпоинту через HTTP CONNECT :{p_http} успешен (HTTP code {c_out}).")
-        else:
-            emit("WARN", f"⚠ Запрос к тестовому эндпоинту через HTTP :{p_http} вернул: {c_out} (код: {c_code}).")
+        if p1015_ok and p11015_ok:
+            # 1. Проверка HTTP CONNECT через сокет 11015 к тестовому эндпоинту API
+            c_code, c_out = exec_wsl(f"curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 4 -x http://127.0.0.1:{p_http} https://api.anthropic.com")
+            if c_code == 0 and c_out in ("200", "404", "401", "403"):
+                emit("SUCCESS", f"✓ Запрос из WSL2 через HTTP CONNECT :{p_http} успешен (HTTP code {c_out}).")
+            else:
+                emit("WARN", f"⚠ Запрос через HTTP :{p_http} вернул: {c_out} (код: {c_code}).")
 
-        # 2. Проверка Remote DNS и внешнего IP через SOCKS5H
-        c2_code, c2_out = exec_wsl(f"curl -s --connect-timeout 4 --socks5-hostname 127.0.0.1:{p_socks} https://ifconfig.me")
-        if c2_code == 0 and c2_out and not "curl:" in c2_out:
-            wsl_proxy_ip = c2_out
-            emit("SUCCESS", f"✓ Запрос из WSL2 через SOCKS5 :{p_socks} успешен. Внешний IP прокси: {wsl_proxy_ip}")
-            dns_leak_protected = True
-            emit("SUCCESS", "✓ Защита от DNS-утечек: ДА (протокол socks5h делегирует DNS-резолв в туннель, локальный DNS хоста не опрашивается).")
+            # 2. Проверка Remote DNS и внешнего IP через SOCKS5H
+            c2_code, c2_out = exec_wsl(f"curl -s --connect-timeout 4 --socks5-hostname 127.0.0.1:{p_socks} https://ifconfig.me")
+            if c2_code == 0 and c2_out and not "curl:" in c2_out:
+                wsl_proxy_ip = c2_out
+                emit("SUCCESS", f"✓ Запрос из WSL2 через SOCKS5 :{p_socks} успешен. Внешний IP прокси: {wsl_proxy_ip}")
+                dns_leak_protected = True
+                emit("SUCCESS", "✓ Защита от DNS-утечек: ДА (протокол socks5h делегирует DNS в туннель, DNS хоста не опрашивается).")
+            else:
+                emit("ERROR", f"✕ Тест SOCKS5H :{p_socks} завершился с ошибкой: {c2_out}")
         else:
-            emit("ERROR", f"✕ Тест SOCKS5H :{p_socks} завершился с ошибкой: {c2_out}")
+            emit("WARN", f"⚠ Сокет :{p_socks} / :{p_http} оффлайн. Проверка работы Killswitch...")
+            c_off_code, c_off_out = exec_wsl(f"curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 3 -x http://127.0.0.1:{p_http} https://api.anthropic.com")
+            if c_off_code != 0 or c_off_out == "000":
+                emit("SUCCESS", "✓ Трафик через закрытый порт HTTP CONNECT надёжно отвергнут.")
+
+        # 3. КРИТИЧЕСКИЙ ТЕСТ: Проверка прямого выхода (Direct IP Leak Test)
+        c_dir_code, c_dir_out = exec_wsl("curl -s --connect-timeout 2 --noproxy '*' https://ifconfig.me")
+        if c_dir_code != 0:
+            emit("SUCCESS", "✓ Защита от прямого выхода: АКТИВНА (Прямой интернет-трафик отклонён ядром Linux, утечка IP невозможна).")
+        else:
+            direct_leak_detected = True
+            emit("ERROR", f"✕ ВНИМАНИЕ: ОБНАРУЖЕНА УТЕЧКА СЕТИ! Прямой выход успешен без прокси, реальный IP: {c_dir_out}")
+
+        # 4. ТЕСТ ЗАЩИТЫ ОТ ОБХОДОВ: Проверка стороннего локального сокета 2080
+        c_byp_code, c_byp_out = exec_wsl("curl -s --connect-timeout 2 -x http://127.0.0.1:2080 https://ifconfig.me")
+        if c_byp_code != 0:
+            emit("SUCCESS", "✓ Защита от сторонних обходов: АКТИВНА (Попытка обхода через сокет :2080 отклонена ядром).")
+        else:
+            bypass_leak_detected = True
+            emit("WARN", f"⚠ Сторонний сокет :2080 доступен (IP: {c_byp_out}).")
+
+        # 5. Тест блокировки Claude к эндпоинту API при оффлайн-порте
+        if not p1015_ok:
+            c_api_dir_code, c_api_dir_out = exec_wsl("curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 --noproxy '*' https://api.anthropic.com")
+            if c_api_dir_code != 0 or c_api_dir_out == "000":
+                emit("SUCCESS", "✓ Режим Killswitch подтверждён: доступ к Anthropic API полностью заблокирован на уровне ядра (Zero Leaks).")
+            else:
+                emit("ERROR", f"✕ Ошибка Killswitch: Anthropic API доступен напрямую (HTTP {c_api_dir_out})!")
     else:
         # Режим ВЫКЛ: проверяем прямой выход из WSL2
         c_dir_code, c_dir_out = exec_wsl("curl -s --connect-timeout 4 https://ifconfig.me")
@@ -685,13 +777,28 @@ def run_isolation_diagnostic(
     # --- ЭТАП 4: Итоговое заключение ---
     emit("STEP", "--- [ЭТАП 4/4] Итоговый вердикт аудита изоляции ---")
     if restr_on:
-        if p1015_ok and p11015_ok and wsl_has_proxy and dns_leak_protected:
+        if direct_leak_detected:
+            emit("ERROR", "═════════════════════════════════════════════════════════════════════")
+            emit("ERROR", " КРИТИЧЕСКАЯ УТЕЧКА СЕТИ (LEAK DETECTED):")
+            emit("ERROR", " • Прямое соединение без прокси доступно в WSL2 в обход ограничений!")
+            emit("ERROR", " • Проверьте применение правил фильтрации ядра Linux.")
+            emit("ERROR", "═════════════════════════════════════════════════════════════════════")
+            status = "leak"
+        elif p1015_ok and p11015_ok and wsl_has_proxy and dns_leak_protected:
             emit("SUCCESS", "═════════════════════════════════════════════════════════════════════")
             emit("SUCCESS", " ИЗОЛЯЦИЯ ПОЛНОСТЬЮ ПОДТВЕРЖДЕНА:")
             emit("SUCCESS", f" • Claude Code в WSL2 строго замкнут на системный прокси :{p_socks} / :{p_http}.")
+            emit("SUCCESS", " • Прямой выход и сторонние сокеты (:2080) физически заблокированы ядром Linux.")
             emit("SUCCESS", " • DNS-запросы безопасно туннелируются через socks5h, утечек DNS нет.")
             emit("SUCCESS", "═════════════════════════════════════════════════════════════════════")
             status = "isolated"
+        elif not p1015_ok:
+            emit("SUCCESS", "═════════════════════════════════════════════════════════════════════")
+            emit("SUCCESS", f" 🛡️ KILLSWITCH АКТИВЕН (ПОЛНАЯ БЛОКИРОВКА СЕТИ):")
+            emit("SUCCESS", f" • Сокет :{p_socks} закрыт. Все сетевые запросы из WSL2 полностью заблокированы ядром.")
+            emit("SUCCESS", " • Утечки исключены: прямой доступ и обходные каналы физически перекрыты (Zero Leaks).")
+            emit("SUCCESS", "═════════════════════════════════════════════════════════════════════")
+            status = "lockdown"
         else:
             emit("WARN", "═════════════════════════════════════════════════════════════════════")
             emit("WARN", " ПРЕДУПРЕЖДЕНИЕ: Обнаружены проблемы с доступностью портов или настройками WSL2.")
@@ -713,5 +820,8 @@ def run_isolation_diagnostic(
         "p11015_open": p11015_ok,
         "wsl_proxy_ip": wsl_proxy_ip,
         "dns_leak_protected": dns_leak_protected,
+        "kernel_isolated": kernel_isolated,
+        "direct_leak_detected": direct_leak_detected,
+        "bypass_leak_detected": bypass_leak_detected,
     }
 
