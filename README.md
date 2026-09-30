@@ -100,6 +100,11 @@ To gather rigorous, reproducible benchmark data, each subagent worker node must 
 - **Fault-Tolerant Socket Lock (`SO_REUSEADDR`):** Eliminates `WinError 10048` address conflicts during rapid app restarts when the loopback socket (`127.0.0.1:38124`) resides in transient `TIME_WAIT` states.
 - **Smart Handshake & Win32 Foreground Restorer:** If an instance is already running, subsequent launches transmit a `SHOW` signal over the loopback socket, leveraging native Win32 `SetForegroundWindow` API to restore the window from system tray directly into foreground focus.
 
+### 📦 7. Omni_Aion: Master-Key Bundle Installer & Deployment
+- **Encrypted Stack Bundle (.hbin):** Self-contained deployment archive bundling Node.js runtime, AionUi 2.1.47 standalone binaries, OmniRoute load balancer, and sensitive credentials inside an AES-256-GCM encrypted vault (`vault.enc`).
+- **Single-Prompt Master Key:** The master password is asked strictly once during the initial install to decrypt Gemini tokens and seed local databases. Routine startups run completely unattended without password prompts.
+- **AI Agent Automation & Skill Integration:** Packaged inside the `Omni_Aion/` directory with CLI runners (`Omni_Aion/install_herdr_stack.py --key "<KEY>" --yes`), self-test suites (`Omni_Aion/verify_stack.py`), and a dedicated Gemini skill (`omni-aion-bundle-deploy`) providing workarounds for WSL proxy bypass, SQLite WAL locks, and high-speed UNC streaming extraction.
+
 ---
 
 # 🇷🇺 Русский: Обзор исследовательского проекта
@@ -151,3 +156,43 @@ To gather rigorous, reproducible benchmark data, each subagent worker node must 
 9. **Интерактивный аудит сетевой изоляции и защита от утечек DNS:**
    - Модальное окно диагностики в Herdr Center с цветным потоковым выводом проверки в реальном времени.
    - Полное тестирование: доступность сокетов 1015/11015, конфигурация сетевых параметров рабочего узла в WSL2, реальный сетевой тест и аудит DNS-запросов на отсутствие утечек.
+10. **Модуль Omni_Aion: Автономный инсталлятор и развертывание по мастер-ключу:**
+   - **Защищенный контейнер дистрибутива (.hbin):** Полный комплект для развертывания с нуля: автономный рантайм AionUi 2.1.47, шлюз OmniRoute, менеджер отказоустойчивости Gemini и зашифрованный контейнер `vault.enc` (AES-256-GCM + PBKDF2 600k) с OAuth-токенами Google и базами данных.
+   - **Принцип однократного ввода мастер-ключа:** Ключ требуется только при первой распаковке на чистой машине. После восстановления токены сохраняются в защищенном локальном хранилище, и при последующих повседневных запусках сервисы стартуют автоматически без ввода пароля.
+   - **Пакетная изоляция в папке `Omni_Aion/`:** Все скрипты развертывания сгруппированы во вложенную директорию:
+     - `Omni_Aion/stack_bundle_manager.py` — ядро упаковки, шифрования и быстрой потоковой распаковки через UNC-пути WSL.
+     - `Omni_Aion/install_herdr_stack.py` — универсальный CLI-инсталлятор с поддержкой автоматического режима (`--key <KEY> --yes`).
+     - `Omni_Aion/verify_stack.py` — инструмент проверки статуса портов :20128, :25808 и реального инференса через `auto/best-fast`.
+     - `Omni_Aion/test_omni_aion.py` — набор тестов криптографии и эндпоинтов.
+   - **Интеграция в GUI:** Вкладка «Маршруты и aiWatcher» содержит карточку с кнопками «Собрать инсталлятор (.hbin)» и «Развернуть стек (Мастер-ключ)» с выводом хода процесса в лог-консоль.
+
+---
+
+## 🤖 Автономное развертывание с помощью ИИ (Gemini)
+
+Благодаря выделенному скиллу **`omni-aion-bundle-deploy`**, ИИ-агент Gemini может самостоятельно выполнить установку стека и расшифровать токены, получив от пользователя только мастер-ключ:
+
+1. **Команда пользователю для передачи мастер-ключа:**
+   ```text
+   «Вот мастер-ключ [ПАРОЛЬ], разверни Omni_Aion, восстанови аккаунты Gemini и протестируй стек»
+   ```
+2. **Автономные действия Gemini:**
+   - Агент находит последний `.hbin` бандл в каталоге `dist/`.
+   - Запускает установку без блокировки ввода:
+     ```powershell
+     & ".venv\Scripts\python.exe" "Omni_Aion\install_herdr_stack.py" --key "<МАСТЕР_КЛЮЧ>" --yes
+     ```
+   - При возникновении известных сбоев опирается на инструкции скилла:
+     - *Сетевые тайм-ауты loopback:* автоматическое включение `--noproxy '*'` и `no_proxy="*"`, предотвращающее попадание запросов к OmniRoute/AionUi в прокси-сокет :1015/:11015.
+     - *Блокировки баз SQLite:* использование SQLite Online Backup API и недопущение прямого чтения `storage.sqlite` через UNC во время работы процессов.
+     - *Имена моделей:* адресация тестового инференса на алиас `auto/best-fast` вместо необработанного имени.
+   - Запускает сквозную проверку:
+     ```powershell
+     & ".venv\Scripts\python.exe" "Omni_Aion\verify_stack.py"
+     ```
+   - Запускает юнит-тесты:
+     ```powershell
+     & ".venv\Scripts\python.exe" -m unittest Omni_Aion/test_omni_aion.py
+     ```
+   - Возвращает пользователю структурированный статус-отчет о доступности всех эндпоинтов и задержке инференса.
+

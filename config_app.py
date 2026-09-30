@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import queue
@@ -64,6 +65,7 @@ import claude_oauth_manager
 import integrations_manager
 import token_vault_manager
 import watchdog_manager
+import stack_bundle_manager
 import i18n
 from i18n import t
 
@@ -4504,6 +4506,46 @@ class HerdrConfigApp(tk.Tk):
         )
         self.btn_integ_clear_console.pack(side="right", padx=6)
 
+        # ── Карточка: Установочный дистрибутив стека (OmniRoute + AionUi + Gemini) ──
+        card_bundle = tk.Frame(parent, bg=C["card"], bd=1, relief="solid")
+        card_bundle.configure(highlightbackground=C["border"], highlightthickness=1)
+        card_bundle.pack(fill="x", pady=(0, 12))
+
+        pad_bundle = tk.Frame(card_bundle, bg=C["card"])
+        pad_bundle.pack(fill="x", padx=16, pady=12)
+
+        head_b = tk.Frame(pad_bundle, bg=C["card"])
+        head_b.pack(fill="x", pady=(0, 4))
+
+        tk.Label(
+            head_b, text=t("card_stack_bundle_title"), font=FONT_BOLD,
+            fg=C["fg"], bg=C["card"]
+        ).pack(side="left")
+
+        tk.Label(
+            pad_bundle, text=t("card_stack_bundle_desc"), font=FONT_SUB,
+            fg=C["subtext"], bg=C["card"], wraplength=760, justify="left"
+        ).pack(anchor="w", pady=(0, 10))
+
+        b_btn_bar = tk.Frame(pad_bundle, bg=C["card"])
+        b_btn_bar.pack(fill="x")
+
+        self.btn_build_bundle = tk.Button(
+            b_btn_bar, text=t("btn_build_stack_bundle"), font=FONT_BOLD,
+            bg=C["accent_mauve"], fg="#11111b", activebackground=C["accent_hover"],
+            bd=0, padx=14, pady=6, cursor="hand2",
+            command=self.on_build_stack_bundle_click
+        )
+        self.btn_build_bundle.pack(side="left", padx=(0, 8))
+
+        self.btn_install_bundle = tk.Button(
+            b_btn_bar, text=t("btn_install_stack_bundle"), font=FONT_BOLD,
+            bg=C["accent_blue"], fg="#11111b", activebackground="#b4befe",
+            bd=0, padx=14, pady=6, cursor="hand2",
+            command=self.on_install_stack_bundle_click
+        )
+        self.btn_install_bundle.pack(side="left", padx=8)
+
         # ── Карточка 2: Консоль хода выполнения (Логи) ──────────────────────
         con_card = tk.Frame(parent, bg=C["card"], bd=1, relief="solid")
         con_card.configure(highlightbackground=C["border"], highlightthickness=1)
@@ -4942,6 +4984,192 @@ class HerdrConfigApp(tk.Tk):
         btn_close.pack(side="right")
 
         load_content()
+
+    def on_build_stack_bundle_click(self):
+        """Сборка автономного дистрибутива стека с шифрованием мастер-ключом."""
+        if getattr(self, "_integ_task_running", False):
+            messagebox.showwarning(t("app_name"), "Другая операция интеграции уже выполняется.", parent=self)
+            return
+
+        # Запрос мастер-пароля
+        pw1 = simpledialog.askstring(
+            "Мастер-ключ шифрования",
+            "Задайте мастер-ключ для защиты токенов и базы данных:\n(он потребуется для распаковки при первом запуске на целевой машине)",
+            show="*",
+            parent=self
+        )
+        if not pw1:
+            return
+        if len(pw1) < 6:
+            messagebox.showerror("Ошибка", "Длина мастер-ключа должна быть не менее 6 символов.", parent=self)
+            return
+
+        pw2 = simpledialog.askstring(
+            "Подтверждение мастер-ключа",
+            "Повторите мастер-ключ:",
+            show="*",
+            parent=self
+        )
+        if pw1 != pw2:
+            messagebox.showerror("Ошибка", "Мастер-ключи не совпадают!", parent=self)
+            return
+
+        # Выбор пути сохранения
+        dist_dir = BASE_DIR / "dist"
+        dist_dir.mkdir(parents=True, exist_ok=True)
+        def_name = f"herdr_stack_bundle_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.hbin"
+        out_path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Сохранить бандл инсталлятора стека",
+            initialdir=str(dist_dir),
+            initialfile=def_name,
+            defaultextension=".hbin",
+            filetypes=[("Herdr Stack Bundle", "*.hbin"), ("All files", "*.*")]
+        )
+        if not out_path:
+            return
+
+        self._integ_task_running = True
+        self.btn_build_bundle.config(state="disabled", text="⏳ Сборка...")
+        self.btn_install_bundle.config(state="disabled")
+        self.lbl_integ_overall.config(text="BUILDING BUNDLE...", bg=C["accent_mauve"], fg="#11111b")
+
+        def worker():
+            err_msg = None
+            bundle_file = None
+            try:
+                def cb(msg: str):
+                    level = "STEP" if msg.startswith("[+]") else "INFO"
+                    integrations_manager.logger.log(msg, level)
+
+                bundle_file = stack_bundle_manager.build_stack_bundle(
+                    master_key=pw1,
+                    output_path=Path(out_path),
+                    log_callback=cb
+                )
+            except Exception as e:
+                err_msg = str(e)
+                integrations_manager.logger.log(f"Критическая ошибка сборки бандла: {e}", "ERROR")
+
+            def done():
+                self._integ_task_running = False
+                self.btn_build_bundle.config(state="normal", text=t("btn_build_stack_bundle"))
+                self.btn_install_bundle.config(state="normal")
+                self.lbl_integ_overall.config(text="READY", bg=C["green"], fg="#11111b")
+
+                if err_msg:
+                    messagebox.showerror("Ошибка сборки", f"Не удалось собрать бандл:\n\n{err_msg}", parent=self)
+                elif bundle_file and bundle_file.exists():
+                    sz_mb = bundle_file.stat().st_size / (1024 * 1024)
+                    msg = (
+                        f"Бандл успешно собран!\n\n"
+                        f"Файл: {bundle_file.name}\n"
+                        f"Размер: {sz_mb:.1f} МБ\n"
+                        f"Путь: {bundle_file}\n\n"
+                        f"Мастер-ключ защищает конфиденциальные токены (AES-256-GCM).\n"
+                        f"Сохраните этот мастер-ключ: он потребуется при первом развертывании!"
+                    )
+                    show_toast(self, "Сборка завершена", msg)
+                    messagebox.showinfo("Бандл готов", msg, parent=self)
+
+            try:
+                if not getattr(self, "_closing", False):
+                    self.after(0, done)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_install_stack_bundle_click(self):
+        """Развертывание автономного дистрибутива стека по мастер-ключу."""
+        if getattr(self, "_integ_task_running", False):
+            messagebox.showwarning(t("app_name"), "Другая операция интеграции уже выполняется.", parent=self)
+            return
+
+        # Поиск бандлов в dist или выбор файла
+        dist_dir = BASE_DIR / "dist"
+        in_path = filedialog.askopenfilename(
+            parent=self,
+            title="Выберите файл установочного бандла (.hbin)",
+            initialdir=str(dist_dir) if dist_dir.exists() else str(BASE_DIR),
+            filetypes=[("Herdr Stack Bundle", "*.hbin"), ("All files", "*.*")]
+        )
+        if not in_path:
+            return
+
+        # Подтверждение
+        if not messagebox.askyesno(
+            "Подтверждение развертывания",
+            f"Вы выбрали бандл:\n{Path(in_path).name}\n\n"
+            f"Установка выполнит развертывание сервисов AionUi и OmniRoute, восстановит рабочие базы данных "
+            f"и токены аккаунтов Gemini.\n\nПродолжить?",
+            parent=self
+        ):
+            return
+
+        # Запрос мастер-ключа
+        pw = simpledialog.askstring(
+            "Мастер-ключ доступа",
+            "Введите мастер-ключ для расшифровки токенов и базы данных:\n(задается один раз при первой установке)",
+            show="*",
+            parent=self
+        )
+        if not pw:
+            return
+
+        self._integ_task_running = True
+        self.btn_install_bundle.config(state="disabled", text="⏳ Развертывание...")
+        self.btn_build_bundle.config(state="disabled")
+        self.lbl_integ_overall.config(text="DEPLOYING STACK...", bg=C["accent_blue"], fg="#11111b")
+
+        def worker():
+            err_msg = None
+            report = None
+            try:
+                def cb(msg: str):
+                    level = "STEP" if msg.startswith("[+]") else "INFO"
+                    integrations_manager.logger.log(msg, level)
+
+                report = stack_bundle_manager.install_stack_bundle(
+                    master_key=pw,
+                    bundle_path=Path(in_path),
+                    log_callback=cb
+                )
+            except Exception as e:
+                err_msg = str(e)
+                integrations_manager.logger.log(f"Критическая ошибка развертывания: {e}", "ERROR")
+
+            def done():
+                self._integ_task_running = False
+                self.btn_install_bundle.config(state="normal", text=t("btn_install_stack_bundle"))
+                self.btn_build_bundle.config(state="normal")
+
+                if err_msg:
+                    self.lbl_integ_overall.config(text="ERROR", bg=C["red"], fg="#11111b")
+                    messagebox.showerror("Ошибка установки", f"Не удалось развернуть стек:\n\n{err_msg}", parent=self)
+                else:
+                    self.lbl_integ_overall.config(text="DEPLOYED", bg=C["green"], fg="#11111b")
+                    res = report.get("self_test", {}) if report else {}
+                    msg = (
+                        f"Стек успешно развернут!\n\n"
+                        f"• OmniRoute (порт 20128): {'ONLINE' if res.get('omniroute') else 'OFFLINE'}\n"
+                        f"• AionUi (порт 25808): {'ONLINE' if res.get('aionui') else 'OFFLINE'}\n"
+                        f"• Gemini Farm: {'OK' if res.get('gemini_farm') else 'CHECK'}\n\n"
+                        f"Токены и базы данных расшифрованы и сохранены локально.\n"
+                        f"При последующих запусках мастер-ключ больше не потребуется!"
+                    )
+                    show_toast(self, "Стек развернут", msg)
+                    messagebox.showinfo("Установка завершена", msg, parent=self)
+
+                self.on_integrations_status_click()
+
+            try:
+                if not getattr(self, "_closing", False):
+                    self.after(0, done)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # =========================================================================
     # ОБЩАЯ ЛОГИКА И СТАТУС

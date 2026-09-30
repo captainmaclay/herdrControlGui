@@ -48,6 +48,7 @@ extracted_tokens.json
 *.swp
 *~
 *.hbak
+*.hbin
 
 # Runtime generated / dynamic history files
 strategy_history.json
@@ -60,6 +61,8 @@ herdrControlGui/
 .herdr_vault_meta.json
 watchdog_config.json
 backups/
-.agents/
+!.agents/
+.agents/*
+!.agents/skills/
 docs/
 scripts/
