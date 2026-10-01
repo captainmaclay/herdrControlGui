@@ -10,6 +10,13 @@ import sys
 import datetime
 import traceback
 from pathlib import Path
+import pathlib
+
+# Предотвращаем падения Path.exists() / is_file() / is_dir() при обращении к недоступным UNC/WSL путям в Windows
+if hasattr(pathlib, "_IGNORED_WINERRORS"):
+    extra_errors = (53, 64, 67, 1222, 1231)
+    pathlib._IGNORED_WINERRORS = tuple(set(pathlib._IGNORED_WINERRORS + extra_errors))
+
 import backup_manager
 
 EXTENDED_LOG_FILE = backup_manager.BASE_DIR / "extended.log"

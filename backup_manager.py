@@ -55,9 +55,12 @@ WSL_USER = get_wsl_user(WSL_DISTRO)
 def get_wsl_rootfs_path() -> Path | None:
     """Возвращает путь к WSL2 rootfs через UNC путь \\wsl$\\<distro> или \\wsl.localhost\\<distro>."""
     for prefix in [rf"\\wsl$\{WSL_DISTRO}", rf"\\wsl.localhost\{WSL_DISTRO}"]:
-        p = Path(prefix)
-        if p.exists():
-            return p
+        try:
+            p = Path(prefix)
+            if p.exists():
+                return p
+        except OSError:
+            pass
     return None
 
 

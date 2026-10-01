@@ -27,7 +27,12 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
+import pathlib
 from typing import Any
+
+if hasattr(pathlib, "_IGNORED_WINERRORS"):
+    extra_errors = (53, 64, 67, 1222, 1231)
+    pathlib._IGNORED_WINERRORS = tuple(set(pathlib._IGNORED_WINERRORS + extra_errors))
 
 import requests
 import proxy_manager
@@ -110,7 +115,17 @@ def get_token_info(token_file: Path, is_active: bool = False) -> dict[str, Any]:
     """Считывает метаданные из файла токена."""
     prof_name = "__active__" if token_file.parent.name == "antigravity-cli" else token_file.parent.name
     
-    if not token_file.exists():
+    try:
+        if not token_file.exists():
+            return {
+                "exists": False,
+                "is_locked": False,
+                "email": "Нет файла",
+                "name": "-",
+                "is_expired": True,
+                "expiry_text": "Файл отсутствует",
+            }
+    except OSError:
         return {
             "exists": False,
             "is_locked": False,

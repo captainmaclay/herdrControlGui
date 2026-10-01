@@ -66,3 +66,9 @@ backups/
 !.agents/skills/
 docs/
 scripts/
+
+# Large binaries & installers
+*.tar.gz
+*.msi
+*.iso
+*.dmg

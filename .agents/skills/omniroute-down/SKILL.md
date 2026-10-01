@@ -22,8 +22,16 @@ tmux -L omniroute ls                               # есть ли сессия 
 Не проверять живость через `ps aux | grep omniroute`: это совпадёт с любой командой, где встречается
 слово «omniroute» (в том числе с вашей собственной), и покажет ложное «живой».
 
-## 2. Запуск
+## 2. Запуск и восстановление через Actions Framework
 
+Самый быстрый и безопасный способ запуска / перезапуска:
+```powershell
+& ".venv\Scripts\python.exe" -m Omni_Aion.actions --start --force-restart
+# Либо через указание блока 5:
+& ".venv\Scripts\python.exe" -m Omni_Aion.actions --block 5
+```
+
+### Ручной запуск (WSL):
 ```bash
 tmux -L omniroute kill-session -t omniroute 2>/dev/null
 tmux -L omniroute new -d -s omniroute bash -lc 'omniroute serve --no-open'
@@ -33,7 +41,7 @@ for i in $(seq 1 30); do c=$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}
 - В OmniRoute v3.8+ **нет** подкоманды `start`, только `omniroute serve` (или просто `omniroute`).
 - Запускать только в tmux: `nohup` не спасает, Node сам ловит SIGHUP и завершается при закрытии сессии WSL.
 - Только на **своём** сервере tmux (`-L omniroute`), не на общем с AionUi: см. раздел 3.
-- Если порт так и не ответил, выполнить `omniroute serve --no-open` в терминале и прочитать ошибку.
+- **Ошибка HTTP 500 при старте (`markAsUncloneable is not a function`):** вызвана старой версией Node.js 20 в Edge runtime Next.js 16. Решается обновлением до Node.js 22 LTS через `python -m Omni_Aion.actions --block 1`.
 
 ## 3. OmniRoute умирает снова и снова (SIGHUP после перезапуска AionUi)
 

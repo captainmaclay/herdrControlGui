@@ -108,3 +108,55 @@ conn.close()
 6. После правок `config_app.py` или `watchdog_manager.py` запускать: `python -m pytest test_watchdog_manager.py test_aiwatcher_card.py test_ui_command_refs.py test_app_ui.py -q`.
 
 Подробно: [docs/AIWATCHER.md](docs/AIWATCHER.md).
+
+---
+
+## Пакет автоматизированных действий: `actions` (Actions Framework)
+
+Для гарантированной воспроизводимости и исключения ручных ошибок все типовые системные операции инкапсулированы в модуль `C:\MyFiles\herdrCenter\actions`. Агенты и скиллы вызывают эти действия через единый CLI интерфейс или программно через `actions.get_action`.
+
+### Скилл 5: Развертывание Claude Code CLI и Claude Desktop Linux GUI в WSL2
+**Команда скилла:**
+```powershell
+.\.venv\Scripts\python.exe -m actions install_claude_wsl
+```
+**Что выполняется автоматически:**
+1. Проверяет и записывает `%USERPROFILE%\.wslconfig` (`networkingMode=mirrored`, `autoProxy=false` в ANSI/CRLF) для предотвращения утечки трафика на порт 2080.
+2. Настраивает системные переменные окружения прокси в `/etc/profile.d/herdr_claude_env.sh` (SOCKS5 :1015, HTTP :11015).
+3. Устанавливает мост `/usr/local/bin/xdg-open` для мгновенного проброса авторизации OAuth в браузер Windows.
+4. Устанавливает/проверяет Node.js LTS и `@anthropic-ai/claude-code`.
+5. Создает обертку `/usr/local/bin/claude-gui` с флагом `--no-sandbox`.
+6. Создает надежные Windows-ярлыки на Рабочем столе: `Claude Code CLI (WSL).bat` и `Claude Desktop (WSL).vbs` (бесшумный Zero-Flash запуск).
+
+### Скилл 6: Диагностика и автоисцеление мигания Killswitch
+**Команда скилла:**
+```powershell
+.\.venv\Scripts\python.exe -m actions killswitch_heal --port 1015
+```
+**Что выполняется автоматически:**
+1. Идентифицирует реального владельца порта 1015 (`Get-NetTCPConnection` -> PID, ParentPID, CommandLine).
+2. Удаляет несегментированный файл `vless2socks\runtime\xray-config.json`, провоцирующий запуск порта 1015 чужими супервизорами.
+3. При обнаружении дребезга принудительно завершает конфликтующие зомби-процессы `xray.exe`.
+4. Сбрасывает кэш сетевой изоляции в `node_isolate_manager.py`.
+5. Проводит серию контрольных замеров сокета и подтверждает монотонную стабильность (`stable=True`).
+
+### Скилл 7: Управление сетевой изоляцией WSL2 (Zero-Leak Jail)
+**Команды скилла:**
+```powershell
+# Активация строгой изоляции
+.\.venv\Scripts\python.exe -m actions wsl_isolation --mode apply --port 1015
+
+# Верификация изоляции и Zero-Leak
+.\.venv\Scripts\python.exe -m actions wsl_isolation --mode verify
+
+# Экстренное временное снятие изоляции
+.\.venv\Scripts\python.exe -m actions wsl_isolation --mode teardown
+```
+
+### Скилл 8: Сквозная проверка соединения и Anthropic API
+**Команда скилла:**
+```powershell
+.\.venv\Scripts\python.exe -m actions verify_connectivity --port 1015
+```
+Проверяет открытие локальных сокетов (1015 и 11015), выходной иностранный IP изнутри WSL2, доступность `https://api.anthropic.com` без региональной блокировки 400 и отсутствие утечек прямого трафика.
+

@@ -54,8 +54,14 @@ grep -c maintenance "/mnt/d/My files/aiWatcher/watcher_config.json"   # 1 = ок
 `✓ AionUi остановлен, повторных запусков за 8 сек не было` → `[('ok',)]` → `УСПЕХ`.
 `Ремонт ОТМЕНЁН` означает, что сторож поднял AionUi. База не тронута, вернуться к шагу 2.
 
-## Шаг 4. Чистый перезапуск
+## Шаг 4. Чистый перезапуск через Actions Framework
 
+Самый быстрый способ чистого перезапуска со всеми проверками и снятием блокировок:
+```powershell
+& ".venv\Scripts\python.exe" -m Omni_Aion.actions --block 2 --force-restart
+```
+
+*Либо через классический батник:*
 `fix_aionui_login.bat` (= `fix_aionui_login.py --fix`): ставит флаг `.maintenance`, останавливает AionUi
 с проверкой, запускает `tmux new -d -s aionui env -u <6 прокси-переменных> NO_PROXY=* ... --no-open --port 25808`,
 ждёт `/api/auth/status` < 500.

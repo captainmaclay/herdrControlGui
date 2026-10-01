@@ -19,6 +19,16 @@ from .stack_bundle_manager import (
     DEFAULT_BUNDLE_DIR,
     DEFAULT_BUNDLE_NAME,
 )
+from .actions import (
+    PrepareRuntimeAction,
+    SetupAionUiAction,
+    SetupOmniRouteCoreAction,
+    SyncGeminiFarmAction,
+    StartOmniRouteAction,
+    OmniAionDeployPipeline,
+    run_all_blocks,
+    run_block,
+)
 
 __all__ = [
     "build_stack_bundle",
@@ -29,4 +39,12 @@ __all__ = [
     "MAGIC_HEADER",
     "DEFAULT_BUNDLE_DIR",
     "DEFAULT_BUNDLE_NAME",
+    "PrepareRuntimeAction",
+    "SetupAionUiAction",
+    "SetupOmniRouteCoreAction",
+    "SyncGeminiFarmAction",
+    "StartOmniRouteAction",
+    "OmniAionDeployPipeline",
+    "run_all_blocks",
+    "run_block",
 ]

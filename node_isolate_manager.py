@@ -167,11 +167,15 @@ systemctl enable nftables 2>/dev/null || true
     return rc == 0
 
 
+_LAST_APPLIED_ISOLATION_KEY: tuple | None = None
+
+
 def apply_wsl_isolation(
     port: int = 1015,
     http_port: int | None = None,
     block_bypass_ports: list[int] | None = None,
     killswitch: bool = False,
+    force: bool = False,
 ) -> bool:
     """Устанавливает строгую сетевую изоляцию ядра Linux в WSL2.
 
@@ -181,11 +185,15 @@ def apply_wsl_isolation(
     4. Синхронизирует системные переменные окружения в /etc/profile.d/herdr_claude_env.sh.
     5. Фиксирует автономную автозагрузку в /etc/nftables.conf и /etc/wsl.conf.
     """
-    global LAST_APPLY_LOG
+    global LAST_APPLY_LOG, _LAST_APPLIED_ISOLATION_KEY
     if http_port is None:
         http_port = 10000 + int(port)
     if block_bypass_ports is None:
         block_bypass_ports = [2080]
+
+    current_key = (int(port), int(http_port), bool(killswitch), tuple(sorted(block_bypass_ports)))
+    if not force and _LAST_APPLIED_ISOLATION_KEY == current_key:
+        return True
 
     # Скрипт nftables
     nft_commands = [
@@ -264,6 +272,9 @@ def apply_wsl_isolation(
     # Хостовый брандмауэр Windows не блокирует процессы разработчика
     remove_firewall_rule()
 
+    if success:
+        _LAST_APPLIED_ISOLATION_KEY = current_key
+
     LAST_APPLY_LOG = f"WSL Isolation Applied: success={success}, port={port}, killswitch={killswitch}"
     return success
 
@@ -276,7 +287,8 @@ def remove_wsl_isolation() -> bool:
     сохраняется. При следующем перезапуске WSL2 или перезагрузке Windows ограничение
     на сокет 1015 восстановится автоматически по умолчанию.
     """
-    global LAST_APPLY_LOG
+    global LAST_APPLY_LOG, _LAST_APPLIED_ISOLATION_KEY
+    _LAST_APPLIED_ISOLATION_KEY = None
     cmd = """
     nft flush chain inet herdr_filter 2>/dev/null || true
     nft delete table inet herdr_filter 2>/dev/null || true

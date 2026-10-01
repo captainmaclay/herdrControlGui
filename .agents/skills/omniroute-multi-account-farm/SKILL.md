@@ -90,58 +90,19 @@ flowchart TD
 
 ## Скрипт автоматического подключения узла и настройки отказоустойчивых сокетов
 
-Запустите скрипт синхронизации внутри WSL2:
+Самый быстрый и надежный способ синхронизации кластера — запуск готового блока действий:
 
-```python
-import sqlite3, json, uuid, datetime
+```powershell
+& ".venv\Scripts\python.exe" -m Omni_Aion.actions --farm
+# Либо через указание номера блока:
+& ".venv\Scripts\python.exe" -m Omni_Aion.actions --block 4
+```
 
-conn = sqlite3.connect('/home/f/.omniroute/storage.sqlite', timeout=15)
-cur = conn.cursor()
-
-# 1. Регистрация всех SOCKS5 сокетов в proxy_registry
-gemini_proxies = [
-    ('proxy_gemini_1081', 'Gemini SOCKS5 (:1081)', 'socks5', '127.0.0.1', 1081),
-    ('proxy_gemini_1082', 'Gemini SOCKS5 (:1082)', 'socks5', '127.0.0.1', 1082),
-    ('proxy_gemini_1083', 'Gemini SOCKS5 (:1083)', 'socks5', '127.0.0.1', 1083),
-    ('proxy_gemini_1084', 'Gemini SOCKS5 (:1084)', 'socks5', '127.0.0.1', 1084),
-]
-
-unix_now = str(int(datetime.datetime.now().timestamp()))
-for pid, pname, ptype, phost, pport in gemini_proxies:
-    cur.execute("SELECT id FROM proxy_registry WHERE id = ?", (pid,))
-    if not cur.fetchone():
-        cur.execute("""
-            INSERT INTO proxy_registry (id, name, type, host, port, status, created_at, updated_at, source, family)
-            VALUES (?, ?, ?, ?, ?, 'active', ?, ?, 'manual', 'auto')
-        """, (pid, pname, ptype, phost, pport, unix_now, unix_now))
-
-# 2. Настройка отказоустойчивых цепочек для каждого аккаунта (Tier 1)
-cur.execute("SELECT id, name, email FROM provider_connections WHERE provider = 'agy' AND is_active = 1")
-agy_conns = cur.fetchall()
-
-all_proxy_ids = [p[0] for p in gemini_proxies]
-
-for conn_id, name, email in agy_conns:
-    # Определяем приоритетный сокет по имени или конфигу
-    primary = next((pid for pid in all_proxy_ids if pid.split('_')[-1] in name), all_proxy_ids[0])
-    
-    cur.execute("DELETE FROM proxy_assignments WHERE scope = 'account' AND scope_id = ?", (conn_id,))
-    
-    # Приоритет 0: Основной сокет
-    cur.execute("""
-        INSERT INTO proxy_assignments (proxy_id, scope, scope_id, position, created_at, updated_at)
-        VALUES (?, 'account', ?, 0, datetime('now'), datetime('now'))
-    """, (primary, conn_id))
-    
-    # Приоритеты 1..N: Резервные сокеты пула
-    pos = 1
-    for fallback_id in all_proxy_ids:
-        if fallback_id != primary:
-            cur.execute("""
-                INSERT INTO proxy_assignments (proxy_id, scope, scope_id, position, created_at, updated_at)
-                VALUES (?, 'account', ?, ?, datetime('now'), datetime('now'))
-            """, (fallback_id, conn_id, pos))
-            pos += 1
+### Критическое правило изоляции сокетов (Zero-Leak & No PROXY_UNREACHABLE):
+1. **Сокет `:1015` (`proxy_system_1015`):** переводится в статус `'active'` и назначается на позицию 0 (`scope = 'account'` и `scope = 'provider'`).
+2. **Неактивные порты 1081–1090:** обязательно маркируются в `proxy_registry` статусом `'disabled'`. Если оставить их в статусе `'active'`, встроенный планировщик `ProxyHealth` и алгоритм ротации `round-robin` в `proxy_scope_rotation` попытаются отправить запросы через них, получат `PROXY_UNREACHABLE`, что приведет к ложной ошибке `Token expired and refresh failed` и блокировке всех аккаунтов.
+3. **Google Project ID:** в `provider_connections.project_id` и `provider_specific_data` обязательно указывается `projectId: "aicode-consumers"`, `tier: "free-tier"`, `clientProfile: "cli"`.
+4. **Сброс Circuit Breakers:** после обновления базы данных всегда выполняется `UPDATE provider_connections SET backoff_level = 0, rate_limited_until = NULL, last_error = NULL`.
 
 # 3. Настройка общепровайдерского пула (Tier 2)
 cur.execute("DELETE FROM proxy_assignments WHERE scope = 'provider' AND scope_id = 'agy'")

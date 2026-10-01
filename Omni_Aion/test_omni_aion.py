@@ -56,6 +56,12 @@ class TestOmniAionEndpoints(unittest.TestCase):
         self.assertIn("online", res)
         self.assertIn("latency_ms", res)
 
+    def test_gemini_farm_inference(self):
+        res = vs.test_gemini_farm_inference()
+        self.assertTrue(res["inference_ok"], f"Inference failed: {res.get('error')}")
+        self.assertTrue(len(res["response"]) > 0)
+        self.assertIn("READY", res["response"].upper())
+
 
 if __name__ == "__main__":
     unittest.main()

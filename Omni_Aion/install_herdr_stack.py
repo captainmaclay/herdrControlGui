@@ -44,6 +44,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Автономный установщик стека Omni_Aion (OmniRoute + AionUi + Gemini)")
     parser.add_argument("--key", "-k", type=str, default=None, help="Мастер-ключ для расшифровки токенов и БД")
     parser.add_argument("--bundle", "-b", type=str, default=None, help="Путь к файлу бандла (.hbin)")
+    parser.add_argument("--actions", "-a", action="store_true", help="Запустить модульный конвейер Actions Framework вместо распаковки бандла")
     parser.add_argument("--yes", "-y", action="store_true", help="Автоматическое согласие на установку без интерактивных запросов")
     parser.add_argument("--skip-self-test", action="store_true", help="Пропустить проверку сервисов после установки")
     return parser.parse_args()
@@ -54,6 +55,14 @@ def main():
     print("=" * 68)
     print("📦 HERDR STACK INSTALLER & RUNTIME DEPLOYMENT (OmniRoute + AionUi)")
     print("=" * 68)
+
+    # Режим прямого запуска модульных блоков Actions Framework
+    if args.actions:
+        from Omni_Aion.actions import run_all_blocks
+        print("[+] Запуск модульного конвейера Actions Framework (Блоки 1..5)...")
+        res = run_all_blocks()
+        print(res.summary_str())
+        sys.exit(0 if res.success else 1)
 
     # 1. Поиск бандла
     bundle_path = None
@@ -68,9 +77,12 @@ def main():
         bundle_path = find_latest_bundle()
 
     if not bundle_path or not bundle_path.exists():
-        print("[-] Ошибка: в каталоге dist/ не найдено файлов установочных бандлов (*.hbin).")
-        print("    Сначала соберите бандл в Herdr Center или запустите сборщик.")
-        sys.exit(1)
+        print("[!] Файлов бандла (*.hbin) в каталоге dist/ не найдено.")
+        print("[+] Автоматическое переключение на модульный конвейер Actions Framework...")
+        from Omni_Aion.actions import run_all_blocks
+        res = run_all_blocks()
+        print(res.summary_str())
+        sys.exit(0 if res.success else 1)
 
     sz_mb = bundle_path.stat().st_size / (1024 * 1024)
     print(f"[+] Выбран установочный бандл: {bundle_path.name} ({sz_mb:.1f} МБ)")

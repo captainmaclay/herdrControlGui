@@ -69,11 +69,17 @@ def get_claude_settings_files() -> list[Path]:
 
 
 def check_port_accessible(host: str, port: int, timeout: float = 1.0) -> bool:
-    """Быстрая проверка открытости TCP-порта."""
+    """Быстрая проверка открытости TCP-порта с защитой от единичных задержек планировщика."""
     try:
         with socket.create_connection((host, int(port)), timeout=timeout):
             return True
     except (OSError, socket.timeout):
+        if timeout <= 0.25:
+            try:
+                with socket.create_connection((host, int(port)), timeout=timeout):
+                    return True
+            except (OSError, socket.timeout):
+                pass
         return False
 
 

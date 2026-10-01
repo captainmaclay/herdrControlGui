@@ -44,16 +44,24 @@ Get-ChildItem -Path "dist\*.hbin" | Sort-Object LastWriteTime -Descending | Sele
 & ".venv\Scripts\python.exe" -c "import Omni_Aion; Omni_Aion.build_stack_bundle('<МАСТЕР_КЛЮЧ>')"
 ```
 
-### Шаг 2. Запуск установки стека
-Выполнить установку в неблокирующем режиме через CLI:
+### Шаг 2. Ускоренный запуск развертывания через модульные блоки (Actions Framework)
+Стек разбит на 5 изолированных, высокоскоростных блоков `Omni_Aion.actions`, исключающих медленные переустановки:
+
+```powershell
+# Полное сквозное развертывание всех блоков (1..5):
+& ".venv\Scripts\python.exe" -m Omni_Aion.actions --all
+
+# Выборочный вызов конкретного блока при необходимости:
+& ".venv\Scripts\python.exe" -m Omni_Aion.actions --block 1   # Блок 1: Node.js 22 LTS, better-sqlite3 ABI 127, tmux
+& ".venv\Scripts\python.exe" -m Omni_Aion.actions --block 2   # Блок 2: AionUi WebUI (:25808), снятие .maintenance
+& ".venv\Scripts\python.exe" -m Omni_Aion.actions --block 3   # Блок 3: OmniRoute Core (.env, doctor)
+& ".venv\Scripts\python.exe" -m Omni_Aion.actions --block 4   # Блок 4: Gemini Farm (токены, сокет :1015, комбо)
+& ".venv\Scripts\python.exe" -m Omni_Aion.actions --block 5   # Блок 5: Демон OmniRoute (:20128) в tmux -L omniroute
+```
+
+*При первой распаковке зашифрованного архива бандла с диска:*
 ```powershell
 & ".venv\Scripts\python.exe" "Omni_Aion\install_herdr_stack.py" --key "<МАСТЕР_КЛЮЧ>" --yes
-```
-*Либо через Python API:*
-```python
-import Omni_Aion
-bundle = Omni_Aion.find_latest_bundle()
-ok, msg = Omni_Aion.install_stack_bundle(master_key="<МАСТЕР_КЛЮЧ>", bundle_path=bundle)
 ```
 
 ### Шаг 3. Запуск верификации и самотестирования (Self-Test)

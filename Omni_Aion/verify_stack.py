@@ -17,6 +17,12 @@ from pathlib import Path
 # Обеспечиваем no_proxy для локальных запросов
 os.environ["no_proxy"] = "*"
 os.environ["NO_PROXY"] = "*"
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 
 def test_omniroute_endpoint(url: str = "http://127.0.0.1:20128", token: str = "sk-omniroute-secret") -> dict:
