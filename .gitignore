@@ -66,6 +66,7 @@ backups/
 !.agents/skills/
 docs/
 scripts/
+!.agents/skills/*/scripts/
 
 # Large binaries & installers
 *.tar.gz
