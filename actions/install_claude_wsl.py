@@ -237,27 +237,81 @@ class InstallClaudeWslAction(BaseAction):
         return "ok", f"Node.js ({details.get('node_version')}) и Claude CLI ({details.get('claude_version')}) готовы", details
 
     def _setup_claude_gui_wrapper(self) -> tuple[str, str, dict[str, Any]]:
-        """Устанавливает /usr/local/bin/claude-gui со стабильным X11 рендерингом и очисткой замков."""
+        """Устанавливает /usr/local/bin/claude-gui с активацией окна, DBus сессией, мониторингом закрытия и очисткой замков."""
         wrapper_script = (
             "#!/bin/bash\n"
             "source /etc/profile.d/herdr_claude_env.sh 2>/dev/null\n"
             "\n"
-            "# Clean stale SingletonLock if process is dead\n"
-            'LOCK_FILE="/home/79251/.config/Claude/SingletonLock"\n'
-            'if [ -L "$LOCK_FILE" ]; then\n'
-            '    TARGET=$(readlink "$LOCK_FILE")\n'
-            '    PID=$(echo "$TARGET" | grep -oE "[0-9]+$")\n'
-            '    if [ -n "$PID" ] && ! kill -0 "$PID" 2>/dev/null; then\n'
-            "        rm -f /home/79251/.config/Claude/Singleton* 2>/dev/null\n"
+            "export DISPLAY=${DISPLAY:-:0}\n"
+            "export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}\n"
+            "\n"
+            "# Ensure /run/user/<uid> directory exists\n"
+            'if [ ! -d "$XDG_RUNTIME_DIR" ]; then\n'
+            '    mkdir -m 700 -p "$XDG_RUNTIME_DIR" 2>/dev/null || sudo mkdir -m 700 -p "$XDG_RUNTIME_DIR" 2>/dev/null\n'
+            '    sudo chown "$(id -u):$(id -g)" "$XDG_RUNTIME_DIR" 2>/dev/null\n'
+            "fi\n"
+            "\n"
+            "# Ensure user DBus session is running for single-instance IPC\n"
+            'if [ ! -e "$XDG_RUNTIME_DIR/bus" ] && command -v dbus-daemon >/dev/null 2>&1; then\n'
+            '    dbus-daemon --session --fork --address="unix:path=$XDG_RUNTIME_DIR/bus" 2>/dev/null\n'
+            "fi\n"
+            'export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"\n'
+            "\n"
+            "# 1. If an actual visible Claude window is currently open, activate/focus it and exit\n"
+            "if command -v xdotool >/dev/null 2>&1; then\n"
+            '    VISIBLE_WIN=$(xdotool search --onlyvisible --class claude 2>/dev/null | head -n 1)\n'
+            '    if [ -n "$VISIBLE_WIN" ]; then\n'
+            '        xdotool windowactivate "$VISIBLE_WIN" 2>/dev/null\n'
+            "        exit 0\n"
             "    fi\n"
             "fi\n"
             "\n"
-            'if command -v claude-desktop >/dev/null 2>&1; then\n'
-            '    exec claude-desktop --no-sandbox --ozone-platform=x11 --password-store=basic "$@"\n'
-            "else\n"
+            "# 2. No visible window exists: terminate any lingering ghost/headless instances and clear locks\n"
+            "killall -9 claude-desktop chrome_crashpad_handler cowork-linux-helper 2>/dev/null\n"
+            'rm -f "$HOME/.config/Claude/Singleton"* 2>/dev/null\n'
+            "\n"
+            "if ! command -v claude-desktop >/dev/null 2>&1; then\n"
             '    echo "claude-desktop не найден в PATH. Убедитесь, что deb-пакет установлен." >&2\n'
             "    exit 1\n"
             "fi\n"
+            "\n"
+            "# 3. Launch claude-desktop in background\n"
+            'claude-desktop --no-sandbox --ozone-platform=x11 --password-store=basic "$@" &\n'
+            "MAIN_PID=$!\n"
+            "\n"
+            "# 4. Wait for window to appear (up to 15 seconds)\n"
+            "if command -v xdotool >/dev/null 2>&1; then\n"
+            '    WIN_ID=""\n'
+            "    for i in $(seq 1 30); do\n"
+            '        if ! kill -0 "$MAIN_PID" 2>/dev/null; then\n'
+            "            exit 1\n"
+            "        fi\n"
+            '        WIN_ID=$(xdotool search --onlyvisible --class claude 2>/dev/null | head -n 1)\n'
+            '        if [ -n "$WIN_ID" ]; then\n'
+            "            break\n"
+            "        fi\n"
+            "        sleep 0.5\n"
+            "    done\n"
+            "\n"
+            "    # 5. Monitor the window: when the window closes, cleanly terminate background processes\n"
+            '    if [ -n "$WIN_ID" ]; then\n'
+            '        while kill -0 "$MAIN_PID" 2>/dev/null; do\n'
+            "            sleep 2\n"
+            '            CURRENT_WIN=$(xdotool search --onlyvisible --class claude 2>/dev/null | head -n 1)\n'
+            '            if [ -z "$CURRENT_WIN" ]; then\n'
+            '                kill -TERM "$MAIN_PID" 2>/dev/null\n'
+            "                sleep 1\n"
+            "                killall -9 claude-desktop chrome_crashpad_handler cowork-linux-helper 2>/dev/null\n"
+            '                rm -f "$HOME/.config/Claude/Singleton"* 2>/dev/null\n'
+            "                break\n"
+            "            fi\n"
+            "        done\n"
+            "        exit 0\n"
+            "    fi\n"
+            "fi\n"
+            "\n"
+            "# Fallback: if xdotool is not available or window never appeared, just wait on the process\n"
+            'wait "$MAIN_PID"\n'
         )
         b64_content = base64.b64encode(wrapper_script.encode("utf-8")).decode("ascii")
         cmd = f"echo '{b64_content}' | base64 -d > /usr/local/bin/claude-gui && chmod +x /usr/local/bin/claude-gui"
@@ -265,7 +319,7 @@ class InstallClaudeWslAction(BaseAction):
         if rc != 0:
             raise RuntimeError(f"Не удалось установить обертку claude-gui: {err}")
 
-        return "ok", "Обертка claude-gui (--no-sandbox, --ozone-platform=x11) установлена в /usr/local/bin/claude-gui", {}
+        return "ok", "Обертка claude-gui с автоматической очисткой и контролем окна установлена в /usr/local/bin/claude-gui", {}
 
 
     def _create_desktop_shortcuts(self) -> tuple[str, str, dict[str, Any]]:
