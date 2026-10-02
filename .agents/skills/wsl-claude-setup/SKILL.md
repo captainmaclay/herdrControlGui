@@ -55,13 +55,15 @@ description: >-
    - Проверяет версию `node -v` (LTS 20+) и пакет `@anthropic-ai/claude-code`.
    - При отсутствии автоматически устанавливает их в WSL.
 
-5. **Создание GUI-обертки `claude-gui` (`/usr/local/bin/claude-gui`):**
-   - Запускает `claude-desktop` со снятием SUID-песочницы Electron (`--no-sandbox`) для нативной отрисовки в WSLg Wayland/X11 на рабочем столе Windows.
+5. **Создание защищенной GUI-обертки `claude-gui` (`/usr/local/bin/claude-gui`):**
+   - Проверяет и автоматически очищает зависший `SingletonLock`, если старый процесс умер после сна/перезапуска хоста.
+   - Фиксирует стабильный X11-бэкенд (`--ozone-platform=x11`) во избежание GPU-краша 1002 в WSLg.
+   - Запускает `claude-desktop` со снятием SUID-песочницы Electron (`--no-sandbox`).
 
-6. **Создание Windows-ярлыков на Рабочем столе:**
-   - `Claude Code CLI (WSL).bat` (консольный запуск CLI в ANSI/CRLF без кракозябр).
-   - `Claude Desktop (WSL).vbs` (бесшумный Zero-Flash запуск GUI без всплывающего черного консольного окна).
-   - `Claude Desktop (WSL).lnk` с иконкой `claude.ico`.
+6. **Создание надежных Windows-ярлыков на Рабочем столе:**
+   - `Claude Code (WSL).lnk` (консольный запуск CLI в Windows Terminal / CMD).
+   - `Claude Desktop (WSL).lnk` (бесшумный запуск GUI через `run_claude_gui.vbs` без всплывающего черного консольного окна и с иконкой `claude.ico`).
+   - Исполняемые скрипты лаунчеров хранятся в рабочей папке программы (`C:\MyFiles\herdrCenter`), предотвращая случайное удаление с Рабочего стола.
 
 ---
 
@@ -78,3 +80,40 @@ description: >-
 * Получение внешнего нероссийского IP
 * Доступность `api.anthropic.com` без ошибки `400 User location is not supported`
 * Активность сетевой тюрьмы (Zero-Leak)
+
+---
+
+## 4. Диагностика и устранение типовых сбоев GUI (Troubleshooting Runbook)
+
+### Сбой 1: Ярлык не открывает окно, процесс молча завершается через 2 секунды
+* **Причина:** Старый процесс `claude-desktop` завис после отключения/сна Windows и удерживает `~/.config/Claude/SingletonLock`. Новый процесс видит замок, пытается передать фокус мертвому окну (`Request ended (non-user cancelled)`) и сразу выходит.
+* **Быстрое решение:**
+  ```bash
+  wsl -d Ubuntu bash -c "killall -9 claude-desktop chrome_crashpad_handler 2>/dev/null; rm -f ~/.config/Claude/Singleton*"
+  ```
+* **Персистентная защита:** В обертке `/usr/local/bin/claude-gui` внедрена автоматическая проверка `kill -0 $PID` замка перед запуском.
+
+### Сбой 2: Циклический краш GPU (`GPU process launch failed: error_code=1002`)
+* **Причина:** Флаги `--ozone-platform-hint=auto` или Wayland-декорации заставляют Electron использовать нативный Wayland в WSLg, который нестабилен в Chromium.
+* **Решение:** Всегда явно указывать бэкенд X11:
+  ```bash
+  claude-desktop --no-sandbox --ozone-platform=x11 --password-store=basic
+  ```
+
+### Сбой 3: Ошибка `WSL_E_USER_NOT_FOUND` при клике по ярлыку
+* **Причина:** Использование жесткого флага `-u default` при вызове `wsl.exe`. В системе установлен пользователь `79251`.
+* **Решение:** Не указывать флаг `-u` (WSL автоматически подхватывает дефолтного пользователя из `/etc/wsl.conf`) либо использовать актуальное имя пользователя.
+
+### Сбой 4: Приостановка процесса Electron (`State T / Stopped`)
+* **Причина:** Вызов `bash -lic` (интерактивный шелл) внутри скрытого `wscript.exe` активирует Job Control, вызывая `SIGTTIN`/`SIGTTOU` при попытке чтения TTY дочерними скриптами.
+* **Решение:** В [run_claude_gui.vbs](file:///C:/MyFiles/herdrCenter/run_claude_gui.vbs) использовать неинтерактивный шелл:
+  ```vbs
+  WshShell.Run "wsl.exe -d Ubuntu bash -lc ""/usr/local/bin/claude-gui""", 0, False
+  ```
+
+### Сбой 5: Claude Code выдает `API Error: ECONNRESET`, а OmniRoute — 502
+* **Причина:** Рассинхронизация параметров локального сокета 1015/11015 в `vless2socks` (сменился локальный IP машины в `sendThrough` или устарел UUID ключа).
+* **Решение:**
+  1. Проверить сокет: `curl.exe -x socks5h://127.0.0.1:1015 https://icanhazip.com`
+  2. Обновить `instances.json` и `xray-config-1015.json` актуальным UUID и IP.
+  3. Перезапустить процесс `xray.exe`.

@@ -104,9 +104,32 @@
 * **Причина:** Внутри контейнеров и пространств имен WSL2 стандартный песочный механизм Chromium SUID sandbox требует прав, которых у непривилегированного пользователя нет.
 * **Решение:** Приложение `claude-desktop` необходимо запускать с флагом `--no-sandbox`:
   ```bash
-  claude-desktop --no-sandbox
+  claude-desktop --no-sandbox --ozone-platform=x11 --password-store=basic
   ```
-  WSLg (подсистема Windows 11) автоматически подхватит Wayland/X11 окно и отобразит нативное окно Claude Desktop на рабочем столе Windows со скругленными углами и поддержкой масштабирования.
+
+---
+
+### Ошибка 6: Зависший `SingletonLock` после сна/перезапуска Windows
+* **Симптом:** При клике по ярлыку окно не появляется, в логах: `Request ended (non-user cancelled)`.
+* **Причина:** Процесс `claude-desktop` со вчерашнего дня остался в памяти, потеряв дисплей, и удерживает `~/.config/Claude/SingletonLock`. Новый запуск пытается передать фокус мертвому окну и сразу завершается.
+* **Решение:** Добавить в `/usr/local/bin/claude-gui` автоматическую проверку: если PID в замке не отвечает (`! kill -0 $PID`), файл замка удаляется перед стартом. Экстренное снятие вручную:
+  ```bash
+  killall -9 claude-desktop chrome_crashpad_handler; rm -f ~/.config/Claude/Singleton*
+  ```
+
+---
+
+### Ошибка 7: Циклический краш GPU (`GPU process launch failed: error_code=1002`)
+* **Симптом:** Окно не отображается, в `~/.claude-desktop.log` бесконечные строки `GPU process launch failed: error_code=1002`.
+* **Причина:** При флаге `--ozone-platform-hint=auto` Electron выбирает Wayland, который в текущем WSLg крашит процесс GPU.
+* **Решение:** Всегда явно указывать стабильный бэкенд: `--ozone-platform=x11`.
+
+---
+
+### Ошибка 8: Ошибка `WSL_E_USER_NOT_FOUND` при запуске ярлыков
+* **Симптом:** Окно не запускается, ошибка `getpwnam(default) failed 0. Wsl/WSL_E_USER_NOT_FOUND`.
+* **Причина:** Флаг `-u default` при вызове `wsl.exe`. Пользователя `default` в системе нет.
+* **Решение:** Не указывать `-u` (WSL берет дефолтного пользователя из `/etc/wsl.conf`) или использовать реального пользователя системы.
 
 ---
 
@@ -195,7 +218,7 @@ sudo chmod +x /usr/local/bin/claude-gui
 ```bat
 @echo off
 title Claude Code (WSL)
-wsl.exe -d Ubuntu -u default bash -lic "claude"
+wsl.exe -d Ubuntu bash -lic "claude"
 ```
 
 ### 2. Ярлык для графического интерфейса Claude Desktop (без черного окна)
@@ -204,7 +227,7 @@ wsl.exe -d Ubuntu -u default bash -lic "claude"
 * **Батник-исполнитель:** `C:\Users\<User>\Desktop\run_claude_gui.bat`
   ```bat
   @echo off
-  wsl.exe -d Ubuntu -u default bash -lic "claude-desktop --no-sandbox >/dev/null 2>&1 &"
+  wsl.exe -d Ubuntu bash -lic "claude-desktop --no-sandbox >/dev/null 2>&1 &"
   ```
 
 * **VBScript запуска (скрывает черное окно консоли):** `C:\Users\<User>\Desktop\Claude Desktop (WSL).vbs`

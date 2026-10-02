@@ -125,8 +125,13 @@ conn.close()
 2. Настраивает системные переменные окружения прокси в `/etc/profile.d/herdr_claude_env.sh` (SOCKS5 :1015, HTTP :11015).
 3. Устанавливает мост `/usr/local/bin/xdg-open` для мгновенного проброса авторизации OAuth в браузер Windows.
 4. Устанавливает/проверяет Node.js LTS и `@anthropic-ai/claude-code`.
-5. Создает обертку `/usr/local/bin/claude-gui` с флагом `--no-sandbox`.
-6. Создает надежные Windows-ярлыки на Рабочем столе: `Claude Code CLI (WSL).bat` и `Claude Desktop (WSL).vbs` (бесшумный Zero-Flash запуск).
+5. Создает защищенную обертку `/usr/local/bin/claude-gui` с автоматической очисткой зависшего `SingletonLock`, снятием песочницы `--no-sandbox` и стабильным X11-бэкендом `--ozone-platform=x11` (исключает краш GPU 1002 в WSLg).
+6. Создает надежные Windows-ярлыки на Рабочем столе: `Claude Code (WSL).lnk` (CLI) и `Claude Desktop (WSL).lnk` (бесшумный Zero-Flash запуск GUI через VBScript без мигания консоли).
+
+**Экстренное снятие зависших замков (Troubleshooting):**
+```bash
+wsl -d Ubuntu bash -c "killall -9 claude-desktop chrome_crashpad_handler 2>/dev/null; rm -f ~/.config/Claude/Singleton*"
+```
 
 ### Скилл 6: Диагностика и автоисцеление мигания Killswitch
 **Команда скилла:**

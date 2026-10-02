@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 from pathlib import Path
@@ -154,6 +155,11 @@ class InstallClaudeWslAction(BaseAction):
             f"export http_proxy='http://127.0.0.1:{self.http_port}'\n"
             f"export https_proxy='http://127.0.0.1:{self.http_port}'\n"
             f"export all_proxy='socks5h://127.0.0.1:{self.socks_port}'\n"
+            f"export ELECTRON_OZONE_PLATFORM_HINT='auto'\n"
+            f"export GDK_SCALE=2\n"
+            f"export GDK_DPI_SCALE=0.5\n"
+            f"export QT_SCALE_FACTOR=2\n"
+            f"export XCURSOR_SIZE=48\n"
         )
         cmd = f"cat << 'EOF' > /etc/profile.d/herdr_claude_env.sh\n{env_script}EOF\nchmod 644 /etc/profile.d/herdr_claude_env.sh"
 
@@ -231,84 +237,112 @@ class InstallClaudeWslAction(BaseAction):
         return "ok", f"Node.js ({details.get('node_version')}) и Claude CLI ({details.get('claude_version')}) готовы", details
 
     def _setup_claude_gui_wrapper(self) -> tuple[str, str, dict[str, Any]]:
-        """Устанавливает /usr/local/bin/claude-gui со снятием песочницы Electron (--no-sandbox)."""
+        """Устанавливает /usr/local/bin/claude-gui со стабильным X11 рендерингом и очисткой замков."""
         wrapper_script = (
             "#!/bin/bash\n"
             "source /etc/profile.d/herdr_claude_env.sh 2>/dev/null\n"
+            "\n"
+            "# Clean stale SingletonLock if process is dead\n"
+            'LOCK_FILE="/home/79251/.config/Claude/SingletonLock"\n'
+            'if [ -L "$LOCK_FILE" ]; then\n'
+            '    TARGET=$(readlink "$LOCK_FILE")\n'
+            '    PID=$(echo "$TARGET" | grep -oE "[0-9]+$")\n'
+            '    if [ -n "$PID" ] && ! kill -0 "$PID" 2>/dev/null; then\n'
+            "        rm -f /home/79251/.config/Claude/Singleton* 2>/dev/null\n"
+            "    fi\n"
+            "fi\n"
+            "\n"
             'if command -v claude-desktop >/dev/null 2>&1; then\n'
-            '    exec claude-desktop --no-sandbox "$@"\n'
-            'else\n'
+            '    exec claude-desktop --no-sandbox --ozone-platform=x11 --password-store=basic "$@"\n'
+            "else\n"
             '    echo "claude-desktop не найден в PATH. Убедитесь, что deb-пакет установлен." >&2\n'
-            '    exit 1\n'
-            'fi\n'
+            "    exit 1\n"
+            "fi\n"
         )
-        cmd = (
-            f"cat << 'EOF' > /usr/local/bin/claude-gui\n"
-            f"{wrapper_script}"
-            f"EOF\n"
-            f"chmod +x /usr/local/bin/claude-gui"
-        )
+        b64_content = base64.b64encode(wrapper_script.encode("utf-8")).decode("ascii")
+        cmd = f"echo '{b64_content}' | base64 -d > /usr/local/bin/claude-gui && chmod +x /usr/local/bin/claude-gui"
         rc, out, err = self.run_wsl(cmd, user="root", distro=self.distro)
         if rc != 0:
             raise RuntimeError(f"Не удалось установить обертку claude-gui: {err}")
 
-        return "ok", "Обертка claude-gui (--no-sandbox) установлена в /usr/local/bin/claude-gui", {}
+        return "ok", "Обертка claude-gui (--no-sandbox, --ozone-platform=x11) установлена в /usr/local/bin/claude-gui", {}
+
 
     def _create_desktop_shortcuts(self) -> tuple[str, str, dict[str, Any]]:
         """Создает надежные Windows ярлыки на рабочем столе."""
         user_profile = os.environ.get("USERPROFILE", str(Path.home()))
+        app_dir = Path(__file__).resolve().parent.parent
         desktop_dir = Path(user_profile) / "Desktop"
         if not desktop_dir.exists():
             desktop_dir = Path.home() / "Desktop"
 
         created_files = []
 
-        # 1. Батник для CLI (ASCII/CRLF)
-        cli_bat = desktop_dir / "Claude Code CLI (WSL).bat"
+        # 1. Launcher для CLI (ASCII/CRLF) в рабочей папке
+        cli_bat = app_dir / "run_claude_cli.bat"
         cli_bat_content = (
             "@echo off\r\n"
             "title Claude Code (WSL)\r\n"
-            f"wsl.exe -d {self.distro} bash -lic \"claude\"\r\n"
+            "where wt.exe >nul 2>&1\r\n"
+            "if %ERRORLEVEL% equ 0 (\r\n"
+            f"    wt.exe --title \"Claude Code (WSL)\" wsl.exe -d {self.distro} bash -lic \"claude %*\"\r\n"
+            "    exit /b\r\n"
+            ")\r\n"
+            f"wsl.exe -d {self.distro} bash -lic \"claude %*\"\r\n"
+            "if %ERRORLEVEL% neq 0 pause\r\n"
         )
         if not self.dry_run:
             cli_bat.write_text(cli_bat_content, encoding="ascii")
         created_files.append(str(cli_bat))
 
-        # 2. Батник запуска GUI (ASCII/CRLF)
-        gui_runner_bat = desktop_dir / "run_claude_gui.bat"
-        gui_runner_content = (
-            "@echo off\r\n"
-            f"wsl.exe -d {self.distro} bash -lic \"claude-desktop --no-sandbox >/dev/null 2>&1 &\"\r\n"
-        )
-        if not self.dry_run:
-            gui_runner_bat.write_text(gui_runner_content, encoding="ascii")
-        created_files.append(str(gui_runner_bat))
-
-        # 3. VBS скрипт для скрытия консольного окна (Zero-Flash GUI)
-        vbs_launcher = desktop_dir / "Claude Desktop (WSL).vbs"
+        # 2. VBScript для бесшумного запуска GUI (Zero-Flash)
+        vbs_launcher = app_dir / "run_claude_gui.vbs"
         vbs_content = (
             "Set WshShell = CreateObject(\"WScript.Shell\")\r\n"
-            f"WshShell.Run \"cmd /c \"\"{gui_runner_bat}\"\"\", 0, False\r\n"
+            f"WshShell.Run \"wsl.exe -d {self.distro} bash -lic \"\"claude-gui\"\"\", 0, False\r\n"
         )
         if not self.dry_run:
             vbs_launcher.write_text(vbs_content, encoding="ascii")
         created_files.append(str(vbs_launcher))
 
-        # 4. Попытка создать/обновить .lnk с иконкой
-        icon_path = Path(user_profile) / "AppData" / "Local" / "AnthropicClaude" / "claude.ico"
+        # 3. Поиск иконки приложения
+        icon_path = app_dir / "claude.ico"
+        if not icon_path.exists():
+            icon_path = Path(user_profile) / "AppData" / "Local" / "AnthropicClaude" / "claude.ico"
+
+        # 4. Создание ярлыков на рабочем столе (.lnk)
         ps_shortcut_script = f"""
         $wsh = New-Object -ComObject WScript.Shell
-        $lnkPath = "{desktop_dir}\\Claude Desktop (WSL).lnk"
-        $shortcut = $wsh.CreateShortcut($lnkPath)
-        $shortcut.TargetPath = "wscript.exe"
-        $shortcut.Arguments = "`"{vbs_launcher}`""
-        $shortcut.WindowStyle = 7
+        
+        # GUI Ярлык
+        $lnkGui = "{desktop_dir}\\Claude Desktop (WSL).lnk"
+        $scG = $wsh.CreateShortcut($lnkGui)
+        $scG.TargetPath = "$env:SystemRoot\\System32\\wscript.exe"
+        $scG.Arguments = "`"{vbs_launcher}`""
+        $scG.WorkingDirectory = "{app_dir}"
+        $scG.WindowStyle = 7
+        $scG.Description = "Claude Desktop Linux GUI (WSL2 / WSLg)"
         if (Test-Path "{icon_path}") {{
-            $shortcut.IconLocation = "{icon_path}"
+            $scG.IconLocation = "{icon_path},0"
         }}
-        $shortcut.Save()
+        $scG.Save()
+
+        # CLI Ярлык
+        $lnkCli = "{desktop_dir}\\Claude Code (WSL).lnk"
+        $scC = $wsh.CreateShortcut($lnkCli)
+        $scC.TargetPath = "$env:SystemRoot\\System32\\cmd.exe"
+        $scC.Arguments = "/c `"`"{cli_bat}`"`""
+        $scC.WorkingDirectory = "{app_dir}"
+        $scC.WindowStyle = 1
+        $scC.Description = "Claude Code CLI Terminal (WSL2)"
+        if (Test-Path "{icon_path}") {{
+            $scC.IconLocation = "{icon_path},0"
+        }}
+        $scC.Save()
         """
         self.run_powershell(ps_shortcut_script)
         created_files.append(str(desktop_dir / "Claude Desktop (WSL).lnk"))
+        created_files.append(str(desktop_dir / "Claude Code (WSL).lnk"))
 
-        return "ok", f"Созданы ярлыки на рабочем столе ({len(created_files)} шт.)", {"files": created_files}
+        return "ok", f"Созданы надежные ярлыки на рабочем столе ({len(created_files)} шт.)", {"files": created_files}
+
